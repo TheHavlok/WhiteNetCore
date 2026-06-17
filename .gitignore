@@ -255,3 +255,8 @@ cpu.prof
 .kirograph
 package.json
 package-lock.json
+
+# Mobile compiled libraries
+*.aar
+*.xcframework/
+*.jar

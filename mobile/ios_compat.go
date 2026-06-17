@@ -1,6 +1,12 @@
 package mobile
 
+// #cgo darwin LDFLAGS: -lresolv
+// #cgo ios LDFLAGS: -lresolv
+import "C"
+
 import (
+	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +19,9 @@ import (
 	"github.com/xjasonlyu/tun2socks/v2/core/device/iobased"
 	"golang.org/x/net/proxy"
 	"gopkg.in/yaml.v3"
+
+	masterdnsvpn_client "github.com/thehavlok/whitenet/masterdnsvpn/client"
+	masterdnsvpn_config "github.com/thehavlok/whitenet/masterdnsvpn/config"
 )
 
 // Client represents a running VPN/Tunnel client instance.
@@ -42,6 +51,9 @@ type yamlConfig struct {
 		DNS       string `yaml:"dns"`
 		Transport string `yaml:"transport"`
 	} `yaml:"net"`
+	MasterDns struct {
+		Domains []string `yaml:"domains"`
+	} `yaml:"masterdns"`
 	Socks struct {
 		Host string `yaml:"host"`
 		Port int    `yaml:"port"`
@@ -217,27 +229,77 @@ func StartVPN(yamlString string) (*Client, error) {
 
 	log.Printf("StartVPN: starting whitenet with clientID=%s port=%d", clientID, port)
 
-	// Start the whitenet client which spins up the local SOCKS5 proxy
-	err := Start(
-		cfg.Auth.Provider,
-		cfg.Room.ID,
-		clientID,
-		cfg.Crypto.Key,
-		port,
-		cfg.Socks.User,
-		cfg.Socks.Pass,
-	)
+	if cfg.Auth.Provider == "dns" || cfg.Net.Transport == "dns" {
+		// Launch MasterDnsVPN
+		domain := ""
+		if len(cfg.MasterDns.Domains) > 0 {
+			domain = cfg.MasterDns.Domains[0]
+		}
+		
+		jsonStr := fmt.Sprintf(`{
+			"PROTOCOL_TYPE": "SOCKS5",
+			"DOMAINS": ["%s"],
+			"ENCRYPTION_KEY": "%s",
+			"LISTEN_IP": "127.0.0.1",
+			"LISTEN_PORT": %d
+		}`, domain, cfg.Crypto.Key, port)
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to start whitenet: %w", err)
-	}
-	
-	// Wait for SOCKS5 server to come up (30s for WebRTC negotiation)
-	log.Println("StartVPN: waiting for SOCKS5 proxy to become ready...")
-	if err := WaitReady(30000); err != nil {
-		log.Printf("StartVPN: WaitReady failed: %v", err)
-		Stop() // clean up
-		return nil, fmt.Errorf("whitenet not ready: %w", err)
+		b64 := base64.StdEncoding.EncodeToString([]byte(jsonStr))
+
+		appCfg, err := masterdnsvpn_config.LoadClientConfigFromJSONBase64WithOverrides(b64, masterdnsvpn_config.ClientConfigOverrides{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to load masterdnsvpn config: %w", err)
+		}
+
+		// Inject fallback resolvers if none exist
+		if len(appCfg.Resolvers) == 0 {
+			appCfg.Resolvers = []masterdnsvpn_config.ResolverAddress{
+				{IP: "77.88.8.8", Port: 53},
+				{IP: "77.88.8.1", Port: 53},
+				{IP: "77.88.8.88", Port: 53},
+				{IP: "77.88.8.2", Port: 53},
+				{IP: "77.88.8.7", Port: 53},
+				{IP: "77.88.8.3", Port: 53},
+			}
+			appCfg.ResolverMap = make(map[string]int)
+			for i, r := range appCfg.Resolvers {
+				appCfg.ResolverMap[r.IP] = i
+			}
+		}
+
+		app, err := masterdnsvpn_client.BootstrapLoadedConfig(appCfg, "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to start MasterDnsVPN: %w", err)
+		}
+		go func() {
+			err := app.Run(context.Background())
+			if err != nil {
+				log.Printf("MasterDnsVPN Error: %v", err)
+			}
+		}()
+	} else {
+		// Start the original whitenet client
+		err := Start(
+			cfg.Auth.Provider,
+			cfg.Room.ID,
+			clientID,
+			cfg.Crypto.Key,
+			port,
+			cfg.Socks.User,
+			cfg.Socks.Pass,
+		)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to start whitenet: %w", err)
+		}
+		
+		// Wait for SOCKS5 server to come up (30s for WebRTC negotiation)
+		log.Println("StartVPN: waiting for SOCKS5 proxy to become ready...")
+		if err := WaitReady(30000); err != nil {
+			log.Printf("StartVPN: WaitReady failed: %v", err)
+			Stop() // clean up
+			return nil, fmt.Errorf("whitenet not ready: %w", err)
+		}
 	}
 
 	log.Printf("StartVPN: SOCKS5 proxy ready on 127.0.0.1:%d", port)

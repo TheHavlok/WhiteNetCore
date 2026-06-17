@@ -4,11 +4,14 @@ go 1.26.3
 
 require (
 	codeberg.org/rape4me/kc v0.0.0-20260527074346-4cb2a45790c2
+	github.com/BurntSushi/toml v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/klauspost/compress v1.18.6
 	github.com/livekit/protocol v1.46.0
 	github.com/livekit/server-sdk-go/v2 v2.16.4-0.20260522175902-00c9771fae5a
 	github.com/magefile/mage v1.17.2
+	github.com/pierrec/lz4/v4 v4.1.27
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/logging v0.2.4
 	github.com/pion/rtcp v1.2.16
@@ -47,7 +50,6 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/cel-go v0.28.1 // indirect
 	github.com/jxskiss/base62 v1.1.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/reedsolomon v1.14.0 // indirect
 	github.com/lithammer/shortuuid/v4 v4.2.0 // indirect
