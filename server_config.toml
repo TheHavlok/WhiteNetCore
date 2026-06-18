@@ -1,0 +1,3 @@
+CONFIG_VERSION = "12"
+DOMAIN = ["test.com"]
+LOG_LEVEL = "INFO"

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,11 +76,35 @@ func runWithArgs(args []string) error {
 	installStderrFilter()
 	session.RegisterDefaults()
 
-	if len(args) != 1 || args[0] == "-h" || args[0] == "--help" || args[0] == "-help" {
+	// Parse flags for MasterDnsVPN
+	genKeyFlag := false
+	nowaitFlag := false
+	var positionalArgs []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-genkey" || arg == "--genkey" {
+			genKeyFlag = true
+		} else if arg == "-nowait" || arg == "--nowait" {
+			nowaitFlag = true
+		} else if !strings.HasPrefix(arg, "-") {
+			positionalArgs = append(positionalArgs, arg)
+		}
+	}
+
+	if len(positionalArgs) != 1 || positionalArgs[0] == "-h" || positionalArgs[0] == "--help" || positionalArgs[0] == "-help" {
 		return ErrConfigPathRequired
 	}
 
-	cfg, err := loadConfig(args[0])
+	configPath := positionalArgs[0]
+
+	// Auto-detect server mode based on config file extension
+	ext := strings.ToLower(filepath.Ext(configPath))
+	if ext == ".toml" || ext == ".json" {
+		return runMasterDnsVPNServer(configPath, genKeyFlag, nowaitFlag)
+	}
+
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
