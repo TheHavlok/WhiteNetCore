@@ -1,0 +1,1699 @@
+openapi: 3.1.0
+
+info:
+  title: WhiteNet panel API
+  version: "1"
+  description: |
+    The admin API behind the panel's interface, and the two public endpoints
+    the app uses.
+
+    **Where it is mounted.** The admin API lives under the panel path, which is
+    configurable so the panel can sit somewhere unguessable - with the default
+    `/admin`, the paths below are `/admin/api/...`. Set the server URL
+    accordingly. The subscription and lease endpoints are *not* under that
+    path: they are served at the root, on the subscription domain.
+
+    **Authentication** is a session cookie issued by `POST /auth/login`. It is
+    HttpOnly, SameSite=Lax, and Secure whenever the panel is reached over
+    https. There are no API tokens: every call is an administrator acting, and
+    the audit trail records which one.
+
+    **Errors** are always `{"error": {"code", "message", "field"}}`. The code
+    is stable and the message is for a human; `field` is present when one input
+    is at fault. Codes: `bad_request`, `unauthorized`, `forbidden`,
+    `not_found`, `conflict`, `rate_limited`, `internal`,
+    `node_not_connected`, `totp_required`, `account_locked`.
+
+    **Timestamps** are RFC 3339 in UTC. **Traffic** is bytes. A limit of `0`
+    means unlimited, and a null expiry means never.
+
+servers:
+  - url: https://panel.example.com/admin/api
+    description: The admin API, under the configured panel path.
+  - url: https://sub.example.com
+    description: The subscription host, for /sub and /lease.
+
+tags:
+  - name: auth
+  - name: nodes
+  - name: inbounds
+  - name: flux
+  - name: users
+  - name: groups
+  - name: observability
+  - name: settings
+  - name: keys
+  - name: public
+
+security:
+  - session: []
+
+paths:
+  /health:
+    get:
+      tags: [auth]
+      summary: Liveness, and whether the database answers
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /auth/setup:
+    get:
+      tags: [auth]
+      summary: Whether the panel still has no administrator
+      security: []
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  setup_needed: { type: boolean }
+    post:
+      tags: [auth]
+      summary: Create the first administrator
+      description: |
+        Works exactly once. As soon as one administrator exists this answers
+        `403`, so an unattended panel cannot be claimed by whoever finds it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, minLength: 12 }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admin: { $ref: "#/components/schemas/Admin" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in
+      description: |
+        Rate limited per client address, and the account itself locks after
+        eight failures - the lock is on the account because an attacker has
+        many addresses and one username to guess at. With two-factor on, a
+        request without `code` answers `401` with code `totp_required`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+                code: { type: string, description: "TOTP code, when two-factor is on" }
+      responses:
+        "200":
+          description: Sets the session cookie.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admin: { $ref: "#/components/schemas/Admin" }
+        "401": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Sign out and clear the cookie
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: The signed-in administrator
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  admin: { $ref: "#/components/schemas/Admin" }
+
+  /auth/password:
+    post:
+      tags: [auth]
+      summary: Change the password
+      description: |
+        The current password is required even though the caller is signed in: a
+        borrowed session must not be enough to lock the owner out. Every other
+        session is signed out on success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current, new]
+              properties:
+                current: { type: string }
+                new: { type: string, minLength: 12 }
+                code: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/totp/start:
+    post:
+      tags: [auth]
+      summary: Begin two-factor setup
+      description: Nothing changes until a code is confirmed, so a half-finished setup cannot lock anyone out.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  url: { type: string, description: "otpauth:// URL for an authenticator" }
+
+  /auth/totp/confirm:
+    post:
+      tags: [auth]
+      summary: Finish two-factor setup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/totp/disable:
+    post:
+      tags: [auth]
+      summary: Turn two-factor off
+      description: Needs both the password and a current code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string }
+                code: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/sessions:
+    get:
+      tags: [auth]
+      summary: Where this administrator is signed in
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: "#/components/schemas/AdminSession" }
+
+  /dashboard:
+    get:
+      tags: [observability]
+      summary: The dashboard figures
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Dashboard" }
+
+  /meta:
+    get:
+      tags: [keys]
+      summary: The lists the interface builds its dropdowns from
+      description: |
+        Protocols with the transports and security each allows, flux carriers
+        with what each needs, Shadowsocks methods with whether they can serve
+        several users, finalmask masks, and the status vocabularies. The
+        interface reads this rather than hard-coding it, so a protocol added to
+        the core appears without a second change.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /nodes:
+    get:
+      tags: [nodes]
+      summary: Every node with its status and last metrics
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    items: { $ref: "#/components/schemas/Node" }
+    post:
+      tags: [nodes]
+      summary: Add a node
+      description: |
+        Returns the node together with the install command, because adding a
+        node and getting its command are one action for an operator. The token
+        in it is single-use and expires.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                address: { type: string, description: "Host or IP clients connect to" }
+                country_code: { type: string, description: "ISO 3166-1 alpha-2, for the flag" }
+                group_ids: { type: array, items: { type: integer } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: { $ref: "#/components/schemas/Node" }
+                  install: { $ref: "#/components/schemas/InstallCommand" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /nodes/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [nodes]
+      summary: One node
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [nodes]
+      summary: Change a node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                address: { type: string }
+                country_code: { type: string }
+                enabled: { type: boolean }
+                group_ids: { type: array, items: { type: integer } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+    delete:
+      tags: [nodes]
+      summary: Remove a node
+      description: Its certificate is revoked, so the agent cannot reconnect.
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /nodes/{id}/install-command:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [nodes]
+      summary: Mint a fresh install command
+      description: Use it to re-enrol a node. The previous token stops working.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallCommand" }
+
+  /nodes/{id}/restart:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [nodes]
+      summary: Restart a core on the node
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                core: { type: string, enum: [xray, wndns, openflux], default: xray }
+      responses:
+        "200": { $ref: "#/components/responses/CommandResult" }
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /nodes/{id}/resync:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [nodes]
+      summary: Push the desired state again
+      description: |
+        Rarely needed: the agent reports its state version on every connect and
+        the panel sends what is missing, so a node that was offline converges
+        on its own. This is for forcing it now.
+      responses:
+        "200": { $ref: "#/components/responses/CommandResult" }
+
+  /nodes/{id}/logs:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [nodes]
+      summary: Fetch a core's log through the agent
+      parameters:
+        - { name: core, in: query, schema: { type: string, enum: [xray, wndns, openflux, agent] } }
+        - { name: lines, in: query, schema: { type: integer, default: 200 } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  core: { type: string }
+                  text: { type: string }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /nodes/{id}/metrics:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [observability]
+      summary: CPU, memory, disk, network and uptime over a window
+      parameters:
+        - name: range
+          in: query
+          schema: { type: string, enum: [hour, day, week], default: hour }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MetricsResponse" }
+
+  /nodes/{id}/traffic:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [observability]
+      summary: Daily traffic for this node
+      parameters: [{ name: days, in: query, schema: { type: integer, default: 30 } }]
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  days:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrafficDay" }
+
+  /nodes/{id}/revoke:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [nodes]
+      summary: Revoke the node's certificate
+      description: The agent is disconnected and cannot come back without re-enrolling.
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /nodes/{id}/inbounds:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [inbounds]
+      summary: The node's inbounds, template-derived ones included
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inbounds:
+                    type: array
+                    items: { $ref: "#/components/schemas/Inbound" }
+    post:
+      tags: [inbounds]
+      summary: Add an inbound to this node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InboundInput" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inbound" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /inbounds/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    patch:
+      tags: [inbounds]
+      summary: Change an inbound, or override a template's value on this node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InboundInput" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inbound" }
+    delete:
+      tags: [inbounds]
+      summary: Remove an inbound
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /templates:
+    get:
+      tags: [inbounds]
+      summary: Inbound templates
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items: { $ref: "#/components/schemas/Template" }
+    post:
+      tags: [inbounds]
+      summary: Create a template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateInput" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+
+  /templates/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [inbounds]
+      summary: One template with its targets
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+    put:
+      tags: [inbounds]
+      summary: Replace a template
+      description: |
+        Every node the template is applied to is reconciled: an inbound derived
+        from it is updated in place, keeping that node's own overrides.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateInput" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+    delete:
+      tags: [inbounds]
+      summary: Delete a template and the inbounds derived from it
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /templates/{id}/targets:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      tags: [inbounds]
+      summary: Set which nodes and groups a template applies to
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_ids: { type: array, items: { type: integer } }
+                group_ids: { type: array, items: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /nodes/{id}/flux:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [flux]
+      summary: The node's flux exit configuration
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FluxConfig" }
+    put:
+      tags: [flux]
+      summary: Configure the flux exit
+      description: |
+        An `l3` configuration comes back with a `warning`: that exit needs an
+        outbound RST filter on the node, which the panel cannot install. See
+        PROTOCOLS.md.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                mode: { type: string, enum: [l4, l3] }
+                params: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FluxConfig" }
+
+  /nodes/{id}/channels:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [flux]
+      summary: The node's flux channels and which are leased
+      description: |
+        A channel carries one client at a time, so the number of channels is
+        the number of simultaneous flux users on that node.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channels:
+                    type: array
+                    items: { $ref: "#/components/schemas/Channel" }
+    post:
+      tags: [flux]
+      summary: Add a channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChannelInput" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+
+  /channels/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    patch:
+      tags: [flux]
+      summary: Change a channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChannelInput" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+    delete:
+      tags: [flux]
+      summary: Remove a channel
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /channels/{id}/rotate:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [flux]
+      summary: Replace the channel's secret
+      description: Any client holding the old one stops working at once.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+
+  /users:
+    get:
+      tags: [users]
+      summary: Users, with search and filters
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "Name or comment" }
+        - { name: status, in: query, schema: { type: string, enum: [active, disabled, expired, limited] } }
+        - { name: group_id, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+                  total: { type: integer }
+    post:
+      tags: [users]
+      summary: Create a user
+      description: |
+        Anything left empty comes from the defaults in Settings, which is what
+        makes creating a user one field in the common case. `valid_days` is an
+        alternative to `expires_at`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                comment: { type: string }
+                expires_at: { type: [string, "null"], format: date-time }
+                valid_days: { type: integer }
+                traffic_limit: { type: integer, format: int64 }
+                devices_limit: { type: integer }
+                reset_strategy: { type: string, enum: [manual, daily, weekly, monthly] }
+                group_ids: { type: array, items: { type: integer } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+
+  /users/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [users]
+      summary: One user
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+    patch:
+      tags: [users]
+      summary: Change a user
+      description: |
+        Disabling or expiring a user removes them from every node they are on,
+        without restarting anything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                comment: { type: string }
+                status: { type: string, enum: [active, disabled] }
+                expires_at: { type: [string, "null"], format: date-time }
+                traffic_limit: { type: integer, format: int64 }
+                devices_limit: { type: integer }
+                reset_strategy: { type: string }
+                group_ids: { type: array, items: { type: integer } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+    delete:
+      tags: [users]
+      summary: Delete a user
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /users/{id}/reissue-token:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [users]
+      summary: Mint a new subscription token
+      description: The old link stops working at once.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubscriptionLinks" }
+
+  /users/{id}/reset-traffic:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [users]
+      summary: Zero the user's counted traffic
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /users/{id}/devices:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [users]
+      summary: The devices that have fetched this subscription
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
+
+  /users/{id}/devices/{deviceID}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: deviceID, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [users]
+      summary: Forget a device, freeing its slot
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+
+  /users/{id}/traffic:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [observability]
+      summary: Daily traffic for this user
+      parameters: [{ name: days, in: query, schema: { type: integer, default: 30 } }]
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  days:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrafficDay" }
+
+  /users/{id}/subscription:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [users]
+      summary: The user's subscription link, deep link and QR code
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubscriptionLinks" }
+
+  /users/{id}/servers:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [users]
+      summary: The servers this user would be served, each with a whitenet:// link
+      description: |
+        Rendered by the subscription server itself, so this is exactly what the
+        app would receive. Use it to try one protocol, or to hand a single
+        server to a single person; a real user gets a subscription link. A
+        server whose link cannot be built reports `error` instead of `link`,
+        rather than failing the list.
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  servers:
+                    type: array
+                    items: { $ref: "#/components/schemas/UserServer" }
+
+  /users/bulk:
+    post:
+      tags: [users]
+      summary: Extend, disable, delete or regroup several users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, user_ids]
+              properties:
+                action: { type: string, enum: [extend, disable, enable, delete, set_groups, reset_traffic] }
+                user_ids: { type: array, items: { type: integer } }
+                days: { type: integer, description: "For extend" }
+                group_ids: { type: array, items: { type: integer }, description: "For set_groups" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  affected: { type: integer }
+
+  /groups:
+    get:
+      tags: [groups]
+      summary: Node groups
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups:
+                    type: array
+                    items: { $ref: "#/components/schemas/Group" }
+    post:
+      tags: [groups]
+      summary: Create a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                comment: { type: string }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+
+  /groups/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    patch:
+      tags: [groups]
+      summary: Rename a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                comment: { type: string }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+    delete:
+      tags: [groups]
+      summary: Delete a group
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /events:
+    get:
+      tags: [observability]
+      summary: The event journal
+      description: Node connects and disconnects, core restarts, failed state applies, lease churn.
+      parameters:
+        - { name: node_id, in: query, schema: { type: integer } }
+        - { name: level, in: query, schema: { type: string, enum: [info, warn, error] } }
+        - { name: limit, in: query, schema: { type: integer, default: 100 } }
+        - { name: before_id, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+
+  /audit:
+    get:
+      tags: [observability]
+      summary: What administrators did
+      parameters:
+        - { name: admin_id, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer, default: 100 } }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+
+  /settings:
+    get:
+      tags: [settings]
+      summary: Branding, domains, user defaults, subscription behaviour
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+    put:
+      tags: [settings]
+      summary: Change settings
+      description: Send only the sections being changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Settings" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+
+  /keys/reality:
+    post:
+      tags: [keys]
+      summary: An x25519 key pair for REALITY
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  private_key: { type: string }
+                  public_key: { type: string }
+
+  /keys/shortid:
+    post:
+      tags: [keys]
+      summary: A REALITY shortId
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { type: object, properties: { short_id: { type: string } } }
+
+  /keys/uuid:
+    post:
+      tags: [keys]
+      summary: A v4 UUID
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { type: object, properties: { uuid: { type: string } } }
+
+  /keys/password:
+    post:
+      tags: [keys]
+      summary: A random password
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { type: object, properties: { password: { type: string } } }
+
+  /keys/shadowsocks:
+    post:
+      tags: [keys]
+      summary: A Shadowsocks key of the length the method needs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method]
+              properties:
+                method: { type: string }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { type: object, properties: { password: { type: string } } }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /keys/flux-secret:
+    post:
+      tags: [keys]
+      summary: A 32-byte flux channel secret, hex
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { type: object, properties: { secret: { type: string } } }
+
+  # ---------------------------------------------------------------- public --
+
+  /sub/{token}:
+    servers: [{ url: "https://sub.example.com" }]
+    parameters: [{ $ref: "#/components/parameters/token" }]
+    get:
+      tags: [public]
+      summary: A subscription - the branded page in a browser, JSON to the app
+      description: |
+        The panel decides by three signals: the `X-HWID` header the app always
+        sends, an explicit `Accept: application/json`, then the user agent.
+        Rate limited per client address, and rendered documents are cached, so
+        a fleet of phones refreshing is not a query storm. An unknown token
+        answers `404` whether it never existed or was reissued.
+      security: []
+      parameters:
+        - { name: X-HWID, in: header, schema: { type: string }, description: "Device identifier; what the device limit counts" }
+        - { name: X-Device-Model, in: header, schema: { type: string } }
+        - { name: X-Platform, in: header, schema: { type: string } }
+        - { name: X-App-Version, in: header, schema: { type: string } }
+      responses:
+        "200":
+          description: The subscription document, or the HTML page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+            text/html:
+              schema: { type: string }
+        "403":
+          description: The device limit is reached; `error.code` is `device_limit`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { description: No such token. }
+        "429": { description: Rate limited. }
+
+  /sub/{token}/json:
+    servers: [{ url: "https://sub.example.com" }]
+    parameters: [{ $ref: "#/components/parameters/token" }]
+    get:
+      tags: [public]
+      summary: The JSON, whatever the caller looks like
+      security: []
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+
+  /sub/{token}/qr.png:
+    servers: [{ url: "https://sub.example.com" }]
+    parameters: [{ $ref: "#/components/parameters/token" }]
+    get:
+      tags: [public]
+      summary: The subscription's QR code
+      security: []
+      responses:
+        "200":
+          description: ""
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+
+  /lease/{token}:
+    servers: [{ url: "https://sub.example.com" }]
+    parameters: [{ $ref: "#/components/parameters/token" }]
+    post:
+      tags: [public]
+      summary: Take a flux channel
+      description: |
+        A channel carries one client at a time. Asking again while holding a
+        lease returns the same channel, so a retry does not burn two.
+      security: []
+      parameters:
+        - { name: node, in: query, schema: { type: string }, description: "Node UUID to lease on" }
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lease" }
+        "409": { description: No free channel on that node. }
+
+  /lease/{token}/{leaseID}/renew:
+    servers: [{ url: "https://sub.example.com" }]
+    parameters:
+      - { $ref: "#/components/parameters/token" }
+      - { name: leaseID, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [public]
+      summary: Renew a lease
+      description: Renew at about half the remaining time.
+      security: []
+      responses:
+        "200":
+          description: ""
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lease" }
+        "404": { description: The lease has lapsed; take a new one. }
+
+  /lease/{token}/{leaseID}/release:
+    servers: [{ url: "https://sub.example.com" }]
+    parameters:
+      - { $ref: "#/components/parameters/token" }
+      - { name: leaseID, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [public]
+      summary: Hand the channel back
+      security: []
+      responses:
+        "204": { description: Released. }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: wn_session
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    token:
+      name: token
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    OK:
+      description: ""
+      content:
+        application/json:
+          schema: { type: object, properties: { ok: { type: boolean } } }
+    Error:
+      description: ""
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    CommandResult:
+      description: |
+        The node carried the command out, or said why not. `node_not_connected`
+        means the node is offline - the desired state still changed and will be
+        applied when it returns.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              detail: { type: string }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            field: { type: string, description: "The input at fault, when one is" }
+
+    Admin:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { type: string }
+        totp_enabled: { type: boolean }
+        last_login_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    AdminSession:
+      type: object
+      properties:
+        id: { type: integer }
+        ip: { type: string }
+        user_agent: { type: string }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+
+    Node:
+      type: object
+      properties:
+        id: { type: integer }
+        uuid: { type: string }
+        name: { type: string }
+        address: { type: string }
+        country_code: { type: string }
+        enabled: { type: boolean }
+        status: { type: string, enum: [online, offline, degraded] }
+        status_reason: { type: string }
+        agent_version: { type: string }
+        xray_version: { type: string }
+        state_version: { type: integer }
+        last_seen_at: { type: [string, "null"], format: date-time }
+        online_users: { type: integer }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/Group" }
+        metrics: { $ref: "#/components/schemas/NodeMetrics" }
+
+    NodeMetrics:
+      type: object
+      properties:
+        cpu_percent: { type: number }
+        memory_used: { type: integer, format: int64 }
+        memory_total: { type: integer, format: int64 }
+        disk_used: { type: integer, format: int64 }
+        disk_total: { type: integer, format: int64 }
+        net_rx_bytes: { type: integer, format: int64 }
+        net_tx_bytes: { type: integer, format: int64 }
+        uptime_seconds: { type: integer, format: int64 }
+        taken_at: { type: string, format: date-time }
+
+    MetricsResponse:
+      type: object
+      properties:
+        range: { type: string }
+        points:
+          type: array
+          items: { $ref: "#/components/schemas/NodeMetrics" }
+
+    InstallCommand:
+      type: object
+      properties:
+        command: { type: string, description: "The whole line to paste on the node" }
+        token: { type: string }
+        expires_at: { type: string, format: date-time }
+        ca_fingerprint: { type: string, description: "What the node pins to verify this panel" }
+
+    Group:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        comment: { type: string }
+        node_count: { type: integer }
+
+    Inbound:
+      type: object
+      properties:
+        id: { type: integer }
+        node_id: { type: integer }
+        tag: { type: string }
+        protocol: { type: string, enum: [vless, vmess, trojan, shadowsocks, shadowsocks2022, hysteria2, wndns] }
+        network: { type: string }
+        security: { type: string }
+        listen_address: { type: string }
+        listen_port: { type: integer }
+        params: { type: object, additionalProperties: { type: string } }
+        secret_keys:
+          type: array
+          items: { type: string }
+          description: "Which secrets are set. The values never leave the panel."
+        forward_to_tag: { type: string, description: "For wndns: the local inbound that authenticates the user" }
+        published: { type: boolean, description: "False keeps it out of subscriptions; a chain target is unpublished" }
+        enabled: { type: boolean }
+        from_template: { type: boolean }
+        template_id: { type: [integer, "null"] }
+        overrides: { type: object, additionalProperties: true }
+        sort_order: { type: integer }
+
+    InboundInput:
+      type: object
+      properties:
+        tag: { type: string }
+        protocol: { type: string }
+        network: { type: string }
+        security: { type: string }
+        listen_address: { type: string }
+        listen_port: { type: integer }
+        params: { type: object, additionalProperties: { type: string } }
+        secrets:
+          type: object
+          additionalProperties: { type: string }
+          description: "Stored encrypted with the master key and never returned"
+        forward_to_tag: { type: string }
+        published: { type: boolean }
+        enabled: { type: boolean }
+        sort_order: { type: integer }
+
+    Template:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        protocol: { type: string }
+        network: { type: string }
+        security: { type: string }
+        listen_port: { type: integer }
+        params: { type: object, additionalProperties: { type: string } }
+        secret_keys: { type: array, items: { type: string } }
+        enabled: { type: boolean }
+        node_ids: { type: array, items: { type: integer } }
+        group_ids: { type: array, items: { type: integer } }
+
+    TemplateInput:
+      type: object
+      required: [name, protocol]
+      properties:
+        name: { type: string }
+        protocol: { type: string }
+        network: { type: string }
+        security: { type: string }
+        listen_port: { type: integer }
+        params: { type: object, additionalProperties: { type: string } }
+        secrets: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean }
+
+    FluxConfig:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        mode: { type: string, enum: [l4, l3] }
+        params: { type: object, additionalProperties: { type: string } }
+        warning: { type: string }
+
+    Channel:
+      type: object
+      properties:
+        id: { type: integer }
+        node_id: { type: integer }
+        uuid: { type: string }
+        name: { type: string }
+        transport: { type: string, description: "The carrier: yandex, vyandex, boards, mailru, cupsonline, oneme, direct" }
+        transport_label: { type: string }
+        url: { type: string }
+        params: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean }
+        shareable: { type: boolean, description: "False for a carrier whose credentials belong to the exit, such as MAX" }
+        has_secret: { type: boolean }
+        session_active: { type: boolean }
+        session_context: { type: string }
+        last_error: { type: string }
+        created_at: { type: string, format: date-time }
+
+    ChannelInput:
+      type: object
+      properties:
+        name: { type: string }
+        transport: { type: string }
+        url: { type: string }
+        params: { type: object, additionalProperties: { type: string } }
+        secret: { type: string, description: "Hex; generate it with /keys/flux-secret" }
+        enabled: { type: boolean }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        uuid: { type: string }
+        name: { type: string }
+        comment: { type: string }
+        status: { type: string, enum: [active, disabled, expired, limited] }
+        expires_at: { type: [string, "null"], format: date-time }
+        traffic_used: { type: integer, format: int64 }
+        traffic_limit: { type: integer, format: int64 }
+        devices_limit: { type: integer }
+        devices_used: { type: integer }
+        reset_strategy: { type: string }
+        sub_token: { type: string }
+        last_sub_fetch_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        groups: { type: array, items: { $ref: "#/components/schemas/Group" } }
+
+    UserServer:
+      type: object
+      properties:
+        id: { type: string, description: "<node-uuid>:<inbound-tag>" }
+        name: { type: string }
+        protocol: { type: string }
+        transport: { type: string }
+        address: { type: string }
+        port: { type: integer }
+        link: { type: string, description: "whitenet:// link carrying this server alone" }
+        error: { type: string }
+
+    Device:
+      type: object
+      properties:
+        id: { type: integer }
+        hwid: { type: string }
+        model: { type: string }
+        platform: { type: string }
+        app_version: { type: string }
+        ip: { type: string }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+
+    TrafficDay:
+      type: object
+      properties:
+        day: { type: string, format: date }
+        up_bytes: { type: integer, format: int64 }
+        down_bytes: { type: integer, format: int64 }
+
+    SubscriptionLinks:
+      type: object
+      properties:
+        url: { type: string }
+        token: { type: string }
+        deep_link: { type: string, description: "whitenetvpn://import?url=... Needs an https subscription URL" }
+        deep_link_error: { type: string }
+        qr_png_base64: { type: string }
+
+    Event:
+      type: object
+      properties:
+        id: { type: integer }
+        node_id: { type: [integer, "null"] }
+        node_name: { type: string }
+        level: { type: string, enum: [info, warn, error] }
+        kind: { type: string }
+        message: { type: string }
+        details: { description: "Arbitrary JSON" }
+        created_at: { type: string, format: date-time }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        admin_id: { type: [integer, "null"] }
+        admin_username: { type: string }
+        action: { type: string }
+        object_type: { type: string }
+        object_id: { type: string }
+        details: { description: "Arbitrary JSON" }
+        ip: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Settings:
+      type: object
+      properties:
+        branding:
+          type: object
+          properties:
+            app_name: { type: string }
+            logo_url: { type: string }
+            support_url: { type: string }
+            message: { type: string }
+            accent_color: { type: string }
+            android_url: { type: string }
+            ios_url: { type: string }
+            windows_url: { type: string }
+            macos_url: { type: string }
+            linux_url: { type: string }
+            instructions_html: { type: string }
+        domains:
+          type: object
+          properties:
+            panel_url: { type: string }
+            sub_base_url: { type: string }
+            agent_endpoint: { type: string }
+        user_defaults:
+          type: object
+          properties:
+            traffic_limit_bytes: { type: integer, format: int64 }
+            valid_days: { type: integer }
+            devices_limit: { type: integer }
+            group_ids: { type: array, items: { type: integer } }
+        subscription:
+          type: object
+          properties:
+            update_interval_hours: { type: integer }
+            rate_limit_per_minute: { type: integer }
+            cache_seconds: { type: integer }
+            include_offline_nodes: { type: boolean }
+        ca_fingerprint: { type: string, readOnly: true }
+
+    Dashboard:
+      type: object
+      properties:
+        nodes_online: { type: integer }
+        nodes_offline: { type: integer }
+        users_active: { type: integer }
+        users_total: { type: integer }
+        online_now: { type: integer }
+        traffic_total: { type: integer, format: int64 }
+        traffic_today: { type: integer, format: int64 }
+        recent_events: { type: array, items: { $ref: "#/components/schemas/Event" } }
+
+    # The app-facing format. SUBSCRIPTION.md is the contract around it.
+    Subscription:
+      type: object
+      properties:
+        version: { type: integer }
+        issued_at: { type: string, format: date-time }
+        update_interval_hours: { type: integer }
+        user:
+          type: object
+          properties:
+            uuid: { type: string }
+            name: { type: string }
+            expires_at: { type: [string, "null"], format: date-time }
+            traffic_used: { type: integer, format: int64 }
+            traffic_limit: { type: integer, format: int64 }
+            devices_limit: { type: integer }
+            devices_used: { type: integer }
+            status: { type: string }
+        servers: { type: array, items: { $ref: "#/components/schemas/SubscriptionServer" } }
+        branding: { type: object, additionalProperties: true }
+
+    SubscriptionServer:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        country: { type: string }
+        group: { type: string }
+        protocol: { type: string }
+        transport: { type: string }
+        address: { type: string }
+        port: { type: integer }
+        sort: { type: integer }
+        params: { type: object, additionalProperties: { type: string } }
+        chain:
+          type: object
+          description: "The inner protocol a tunnel forwards to. No address: the client dials its own tunnel."
+          properties:
+            protocol: { type: string }
+            transport: { type: string }
+            params: { type: object, additionalProperties: { type: string } }
+        flux:
+          type: object
+          properties:
+            mode: { type: string }
+            lease: { type: string }
+            channels: { type: array, items: { $ref: "#/components/schemas/SubscriptionChannel" } }
+
+    SubscriptionChannel:
+      type: object
+      properties:
+        id: { type: string }
+        secret: { type: string }
+        context: { type: string }
+        carriers:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              name: { type: string }
+              url: { type: string }
+              priority: { type: integer }
+              params: { type: object, additionalProperties: { type: string } }
+
+    Lease:
+      type: object
+      properties:
+        channel: { $ref: "#/components/schemas/SubscriptionChannel" }
+        expires_at: { type: string, format: date-time }
+        renew_url: { type: string }
+        release_url: { type: string }

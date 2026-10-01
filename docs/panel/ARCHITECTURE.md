@@ -169,3 +169,13 @@ graph for what is a version table and an ordered loop.
 - Building the React admin UI needs Node, so it is built in CI or on a
   workstation and embedded into the binary. The 1 GB test nodes cannot build
   it, and should not have to.
+
+## The rest of the documentation
+
+| Document | What is in it |
+| --- | --- |
+| [DEPLOY.md](DEPLOY.md) | Standing Main up from scratch, backups, upgrades |
+| [PROTOCOLS.md](PROTOCOLS.md) | Setting up each protocol and connecting to it, including the DNS tunnel and flux |
+| [SUBSCRIPTION.md](SUBSCRIPTION.md) | The JSON the app fetches, and the rules around it |
+| [LINKS.md](LINKS.md) | `whitenet://` share links and `whitenetvpn://import` deep links |
+| [openapi.yaml](openapi.yaml) | The REST API |
