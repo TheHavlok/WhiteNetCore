@@ -27,6 +27,7 @@ import (
 	"time"
 
 	fluxnode "github.com/thehavlok/whitenet/internal/flux/node"
+	fluxutils "github.com/thehavlok/whitenet/internal/flux/utils"
 	"github.com/thehavlok/whitenet/internal/nodepb"
 )
 
@@ -83,6 +84,11 @@ func New(opts Options) *Pool {
 	if log == nil {
 		log = slog.Default()
 	}
+	// The carriers keep their own log, with its own switch, and it is the
+	// only place that says why a document would not open - a captcha, a
+	// login redirect, a handshake that never came. Without this an operator
+	// running the agent in debug sees "channel started" and nothing else.
+	fluxutils.SetDebug(log.Enabled(context.Background(), slog.LevelDebug))
 	return &Pool{
 		opts:     opts,
 		log:      log.With("core", "flux"),

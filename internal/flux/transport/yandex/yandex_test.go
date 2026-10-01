@@ -4,8 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/thehavlok/whitenet/internal/flux/transport"
 )
 
 func clientConfigPage(config string) string {
@@ -141,5 +146,38 @@ func TestFetchDocInfoMissingPermissionsFallsBack(t *testing.T) {
 	}
 	if info.Permissions == nil {
 		t.Error("Permissions should fall back to an empty map, got nil")
+	}
+}
+
+func TestDocsTransportLoadsCookieFile(t *testing.T) {
+	// The exit needs this when Yandex answers with SmartCaptcha, which the
+	// in-band solver cannot pass: without a cookie file there is no way to
+	// give the carrier a signed-in session.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	expires := time.Now().Add(24 * time.Hour).Unix()
+	content := fmt.Sprintf(""+
+		"# Netscape HTTP Cookie File\n"+
+		".yandex.ru\tTRUE\t/\tTRUE\t%d\tSession_id\t3:abc\n"+
+		".example.com\tTRUE\t/\tFALSE\t%d\tother\tvalue\n", expires, expires)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := NewYandexDocsTransport("https://disk.yandex.ru/i/TEST", transport.DefaultConfig())
+	if err := transport.LoadCookieFile(path); err != nil {
+		t.Fatalf("LoadCookieFile: %v", err)
+	}
+
+	got, err := transport.FetchCookies()
+	if err != nil {
+		t.Fatalf("FetchCookies: %v", err)
+	}
+	if got["Session_id"] != "3:abc" {
+		t.Fatalf("the yandex cookie did not survive the round trip: %v", got)
+	}
+	// A cookie for another site must not be carried into Yandex requests.
+	if _, ok := got["other"]; ok {
+		t.Fatalf("a foreign cookie was loaded: %v", got)
 	}
 }

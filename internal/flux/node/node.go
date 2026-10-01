@@ -240,7 +240,16 @@ func Factory(base transport.TransportConfig, isExit bool) manager.Factory {
 
 		switch cfg.Type {
 		case CarrierYandexDocs:
-			return yandex.NewYandexDocsTransport(cfg.URL, base), nil
+			t := yandex.NewYandexDocsTransport(cfg.URL, base)
+			// Optional: a public document needs no account, but from an
+			// address Yandex challenges with SmartCaptcha nothing in-band can
+			// answer, and a signed-in account's cookies are the way through.
+			if file := param("cookies_file"); file != "" {
+				if err := t.LoadCookieFile(file); err != nil {
+					return nil, fmt.Errorf("flux: yandex cookies: %w", err)
+				}
+			}
+			return t, nil
 		case CarrierYandexVolga:
 			t := yandex.NewYandexVolgaTransport(cfg.URL, base)
 			if file := param("cookies_file"); file != "" {

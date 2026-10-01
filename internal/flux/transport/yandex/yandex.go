@@ -525,6 +525,24 @@ func (t *YandexDocsTransport) FetchCookies() (map[string]string, error) {
 	return out, nil
 }
 
+// LoadCookieFile imports a Netscape cookies.txt (yandex.ru cookies only) into
+// the jar, the same way the Volga transport does.
+//
+// It exists because of SmartCaptcha: from an address Yandex does not like, the
+// document redirects to showcaptcha?cc=1, which the in-band PoW solver cannot
+// answer. A signed-in account's cookies are the only thing that gets past it
+// without a browser, so an exit that has to run from such an address needs a
+// way to be given them.
+func (t *YandexDocsTransport) LoadCookieFile(path string) error {
+	t.jarMu.RLock()
+	jar := t.cookieJar
+	t.jarMu.RUnlock()
+	if jar == nil {
+		return fmt.Errorf("ydocs: cookie jar is nil")
+	}
+	return loadYandexCookies(path, jar)
+}
+
 // ApplyCookies replaces the transport's cookie jar with the provided values
 // and forces the current session to reconnect so the next fetchDocInfo uses
 // the new cookies. It is idempotent.
