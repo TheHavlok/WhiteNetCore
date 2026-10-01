@@ -260,3 +260,8 @@ package-lock.json
 *.aar
 *.xcframework/
 *.jar
+
+# Panel and agent configuration: these hold the master key and the database
+# password. Only the .example.toml files belong in the repository.
+/main.toml
+/agent.toml

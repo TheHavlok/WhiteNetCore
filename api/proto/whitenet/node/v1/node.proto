@@ -1,0 +1,288 @@
+// Main <-> agent protocol.
+//
+// Every connection is opened by the agent. A node therefore needs no inbound
+// firewall holes beyond its own VPN ports, and works behind NAT.
+//
+// Two services, two trust levels:
+//
+//   Registration - server-authenticated TLS only, called exactly once with a
+//                  one-time enrolment token, returns the agent's client
+//                  certificate.
+//   NodeControl  - mutual TLS with that certificate. One long-lived
+//                  bidirectional stream carries everything else.
+syntax = "proto3";
+
+package whitenet.node.v1;
+
+import "google/protobuf/timestamp.proto";
+import "whitenet/node/v1/state.proto";
+
+option go_package = "github.com/thehavlok/whitenet/internal/nodepb;nodepb";
+
+// Registration turns a one-time token into a client certificate.
+service Registration {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+}
+
+message RegisterRequest {
+  // The one-time token from the install command. Single use: Main marks it
+  // spent before replying.
+  string token = 1;
+
+  // A PKCS#10 certificate request. The agent generates the key pair locally
+  // and never transmits the private key.
+  bytes csr_pem = 2;
+
+  HostInfo host = 3;
+  string agent_version = 4;
+}
+
+message RegisterResponse {
+  string node_uuid = 1;
+  // The signed client certificate and the CA to verify Main with.
+  bytes client_cert_pem = 2;
+  bytes ca_cert_pem = 3;
+  google.protobuf.Timestamp not_after = 4;
+}
+
+// NodeControl is everything an enrolled agent does.
+service NodeControl {
+  // Session is the only long-lived call. The agent opens it after connecting
+  // and keeps it open; losing it is what "offline" means. Reconnects use
+  // exponential backoff.
+  rpc Session(stream AgentFrame) returns (stream ServerFrame);
+
+  // RenewCertificate is a separate unary call because it must survive a
+  // Session that cannot be established with an expiring certificate.
+  rpc RenewCertificate(RenewCertificateRequest) returns (RegisterResponse);
+}
+
+message RenewCertificateRequest {
+  bytes csr_pem = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Agent -> Main
+// ---------------------------------------------------------------------------
+
+message AgentFrame {
+  oneof body {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    StateApplied state_applied = 3;
+    MetricsReport metrics = 4;
+    TrafficReport traffic = 5;
+    EventReport event = 6;
+    CommandResult command_result = 7;
+    LogChunk log_chunk = 8;
+    ChannelReport channels = 9;
+  }
+}
+
+// Hello opens the stream. The state version it carries is what lets Main
+// decide whether to resend state at all.
+message Hello {
+  string agent_version = 1;
+  uint64 state_version = 2;
+  HostInfo host = 3;
+  CoreVersions cores = 4;
+}
+
+message HostInfo {
+  string hostname = 1;
+  string os = 2;
+  string arch = 3;
+  string kernel = 4;
+  // Public addresses the node was able to discover. Advisory only: the
+  // address clients dial is configured in the panel.
+  repeated string public_ipv4 = 5;
+  repeated string public_ipv6 = 6;
+  uint32 cpu_cores = 7;
+  uint64 mem_total_bytes = 8;
+}
+
+message CoreVersions {
+  string xray = 1;
+  string wndns = 2;
+  string openflux = 3;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp sent_at = 1;
+  uint64 state_version = 2;
+  repeated CoreStatus cores = 3;
+  uint32 online_users = 4;
+}
+
+message CoreStatus {
+  Core core = 1;
+  bool running = 2;
+  // Restarts since the agent started. A climbing counter is how Main decides
+  // a node is degraded rather than offline.
+  uint32 restart_count = 3;
+  google.protobuf.Timestamp started_at = 4;
+  string last_error = 5;
+}
+
+// StateApplied closes the loop on a StateUpdate. A failure is reported with
+// the version that failed so Main can surface it and stop counting the node
+// as converged.
+message StateApplied {
+  uint64 version = 1;
+  bool ok = 2;
+  string error = 3;
+  // Which cores had to be restarted to apply it, for the event log.
+  repeated Core restarted = 4;
+}
+
+message MetricsReport {
+  repeated MetricsSample samples = 1;
+}
+
+// MetricsSample is one point in time. Counters are absolute since boot;
+// Main turns them into rates. Sending absolutes means a lost report shows up
+// as a gap rather than as a permanently wrong total.
+message MetricsSample {
+  google.protobuf.Timestamp at = 1;
+  double cpu_percent = 2;
+  double load1 = 3;
+  uint64 mem_used_bytes = 4;
+  uint64 mem_total_bytes = 5;
+  uint64 disk_used_bytes = 6;
+  uint64 disk_total_bytes = 7;
+  uint64 net_rx_bytes = 8;
+  uint64 net_tx_bytes = 9;
+  uint64 uptime_seconds = 10;
+  uint32 online_users = 11;
+  uint32 tcp_connections = 12;
+}
+
+// TrafficReport ships deltas read from Xray's StatsService.
+//
+// Deltas, not totals, because Xray's own counters reset whenever it restarts.
+// batch_id makes the report idempotent: Main records it and ignores a replay,
+// which is what makes "retry after a dropped connection" safe.
+message TrafficReport {
+  string batch_id = 1;
+  google.protobuf.Timestamp at = 2;
+  repeated TrafficDelta deltas = 3;
+}
+
+message TrafficDelta {
+  uint64 user_id = 1;
+  string inbound_tag = 2;
+  uint64 uplink_bytes = 3;
+  uint64 downlink_bytes = 4;
+}
+
+// ChannelReport says which OpenFlux channels currently carry a session, so
+// the panel can show real occupancy and Main can expire a stale lease.
+message ChannelReport {
+  google.protobuf.Timestamp at = 1;
+  repeated ChannelStatus channels = 2;
+}
+
+message ChannelStatus {
+  uint64 channel_id = 1;
+  bool session_active = 2;
+  google.protobuf.Timestamp since = 3;
+  string last_error = 4;
+}
+
+message EventReport {
+  repeated Event events = 1;
+}
+
+message Event {
+  google.protobuf.Timestamp at = 1;
+  // Severity: info, warning, error.
+  string severity = 2;
+  // Type is a stable machine-readable key, e.g. core_crashed,
+  // core_restarted, state_apply_failed, channel_session_started.
+  string type = 3;
+  string message = 4;
+  Core core = 5;
+}
+
+// LogChunk answers a COMMAND_FETCH_LOGS. Logs are pulled on demand rather
+// than streamed continuously: nodes are remote and logs are large.
+message LogChunk {
+  string request_id = 1;
+  Core core = 2;
+  string text = 3;
+  bool last = 4;
+}
+
+message CommandResult {
+  string command_id = 1;
+  bool ok = 2;
+  string error = 3;
+  // Free-form output, e.g. the version a core was updated to.
+  map<string, string> data = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Main -> agent
+// ---------------------------------------------------------------------------
+
+message ServerFrame {
+  oneof body {
+    HelloAck hello_ack = 1;
+    StateUpdate state_update = 2;
+    UserDelta user_delta = 3;
+    Command command = 4;
+    HeartbeatAck heartbeat_ack = 5;
+  }
+}
+
+message HelloAck {
+  google.protobuf.Timestamp server_time = 1;
+  // True when Main is about to push a StateUpdate because the agent's
+  // version is stale.
+  bool state_follows = 2;
+  NodeSettings settings = 3;
+}
+
+message StateUpdate {
+  NodeState state = 1;
+}
+
+// UserDelta adds or removes users without touching inbounds, which is what
+// keeps Xray from restarting. Applied through Xray's HandlerService.
+//
+// It is an optimisation, not a second source of truth: every delta carries
+// the state version it produces, and a gap in that sequence makes the agent
+// ask for a full StateUpdate.
+message UserDelta {
+  uint64 version = 1;
+  uint64 base_version = 2;
+  repeated User add = 3;
+  repeated uint64 remove_user_ids = 4;
+  // Inbound tags the change applies to; empty means every inbound on the
+  // node that supports users.
+  repeated string inbound_tags = 5;
+}
+
+message HeartbeatAck {
+  google.protobuf.Timestamp server_time = 1;
+}
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  COMMAND_RESTART_CORE = 1;
+  COMMAND_UPDATE_CORE = 2;    // args: core, version ("" = latest)
+  COMMAND_UPDATE_AGENT = 3;   // args: version ("" = latest)
+  COMMAND_FETCH_LOGS = 4;     // args: core, lines
+  COMMAND_RESYNC = 5;         // discard local state and apply what follows
+  COMMAND_PROVISION_CHANNEL = 6;  // OpenFlux: prepare a channel
+  COMMAND_REVOKE_CHANNEL = 7;     // OpenFlux: rotate key, drop the session
+  COMMAND_SHUTDOWN = 8;       // stop every core and exit
+}
+
+message Command {
+  string command_id = 1;
+  CommandType type = 2;
+  Core core = 3;
+  map<string, string> args = 4;
+  google.protobuf.Timestamp deadline = 5;
+}

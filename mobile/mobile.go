@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thehavlok/whitenet/internal/app/session"
@@ -22,6 +24,7 @@ import (
 	"github.com/thehavlok/whitenet/internal/control"
 	"github.com/thehavlok/whitenet/internal/logger"
 	"github.com/thehavlok/whitenet/internal/protect"
+	"github.com/thehavlok/whitenet/internal/xray"
 
 	"github.com/thehavlok/whitenet/internal/transport/vp8channel"
 
@@ -63,6 +66,24 @@ const (
 )
 
 const (
+	// Пинг идёт по той же smux/KCP-сессии, что и полезный трафик, поэтому под
+	// тяжёлой загрузкой (видео) он встаёт в очередь за данными и может
+	// задержаться на секунды. Это не мёртвая связь, и объявлять её мёртвой
+	// нельзя — иначе тяжёлый трафик сам себя и обрывает.
+	//
+	// Отсюда щедрый таймаут на отдельный пинг и 4 промаха подряд. Чаще
+	// опрашивать при этом не вредно: нужно ~38 секунд полной тишины, чтобы
+	// признать связь потерянной, против ~55 у библиотечных дефолтов.
+	//
+	// Быстрый путь — NotifyNetworkChanged, он срабатывает меньше чем за
+	// секунду. Liveness остаётся только запасным детектором для случаев,
+	// когда сеть формально та же, а данные не ходят.
+	mobileLivenessInterval = 6 * time.Second
+	mobileLivenessTimeout  = 20 * time.Second
+	mobileLivenessFailures = 4
+)
+
+const (
 	httpPingWarmupTimeout = 1500 * time.Millisecond
 	httpPingSampleTimeout = 1500 * time.Millisecond
 	httpPingSamples       = 3
@@ -76,9 +97,13 @@ var (
 	registerSet        sync.Once             //nolint:gochecknoglobals // package-level state intentional
 	runClientWithReady = client.RunWithReady //nolint:gochecknoglobals // package-level state intentional
 	cancel             context.CancelFunc    //nolint:gochecknoglobals // package-level state intentional
-	done               chan struct{}         //nolint:gochecknoglobals // package-level state intentional
-	ready              chan struct{}         //nolint:gochecknoglobals // package-level state intentional
-	errRun             error
+	// runGeneration различает запуски клиента. Горутина предыдущего запуска
+	// может ещё доживать (мы больше не ждём её вежливого разрыва до конца), и
+	// без этого счётчика она затирала бы состояние уже нового запуска.
+	runGeneration uint64        //nolint:gochecknoglobals // package-level state intentional
+	done          chan struct{} //nolint:gochecknoglobals // package-level state intentional
+	ready         chan struct{} //nolint:gochecknoglobals // package-level state intentional
+	errRun        error
 )
 
 type mobileConfig struct {
@@ -114,6 +139,33 @@ func SetLogWriter(w LogWriter) {
 // SetProviders registers built-in carriers, links, and transports.
 func SetProviders() {
 	registerDefaults()
+}
+
+// networkChangeCh carries "the default network changed" signals from the
+// platform layer to the running client. Buffered by one and written
+// non-blocking: a burst collapses into a single pending signal, and a
+// notification that arrives while no client is running is simply dropped.
+var networkChangeCh = make(chan struct{}, 1) //nolint:gochecknoglobals // package-level state intentional
+
+// NotifyNetworkChanged tells the running tunnel that the device's default
+// network changed - Wi-Fi to cellular, a new IP after a cell handover, a
+// Wi-Fi reconnect.
+//
+// Call it from ConnectivityManager.NetworkCallback on Android and from
+// NWPathMonitor (or NEProvider.defaultPath) on iOS. Without it nothing
+// notices that the engine's UDP sockets are bound to an interface that no
+// longer exists, and the tunnel stays dead until ICE hits its failed timeout
+// (~25s) or the liveness probe gives up - which is what made the connection
+// look like it "kept dropping on its own".
+//
+// Safe to call at any time, from any thread, whether or not the tunnel is up.
+func NotifyNetworkChanged() {
+	select {
+	case networkChangeCh <- struct{}{}:
+		log.Println("network change reported by the platform")
+	default:
+		// A signal is already pending; the client will coalesce them anyway.
+	}
 }
 
 // SetTransport selects the transport used by Start.
@@ -573,6 +625,9 @@ func startWithConfig(
 	done = make(chan struct{})
 	ready = make(chan struct{})
 	localReady := ready
+	localDone := done
+	runGeneration++
+	generation := runGeneration
 	errRun = nil
 
 	engineName, serviceURL := getAuthDefaults(carrierName)
@@ -606,6 +661,8 @@ func startWithConfig(
 				SOCKSPass: socksPass,
 				Engine:    engineName,
 				URL:       serviceURL,
+
+				NetworkChange: networkChangeCh,
 				TransportOptions: vp8channel.Options{
 					FPS:       cfg.vp8FPS,
 					BatchSize: cfg.vp8BatchSize,
@@ -620,10 +677,16 @@ func startWithConfig(
 		)
 
 		mu.Lock()
-		cancel = nil
-		errRun = err
+		// Только если это всё ещё текущий запуск: иначе мы бы обнулили
+		// cancel уже нового клиента и закрыли ЕГО канал done — второй
+		// close по тому же каналу означал бы панику.
+		if runGeneration == generation {
+			cancel = nil
+			errRun = err
+		}
 		mu.Unlock()
-		close(done)
+
+		close(localDone)
 	}()
 
 	return nil
@@ -682,11 +745,44 @@ func WaitReady(timeoutMillis int) error {
 	}
 }
 
-// Stop gracefully stops the WhiteNet client.
+// Stop gracefully stops the WhiteNet client and terminates the platform
+// supervisor loop, so the tunnel will not silently reconnect afterwards.
+//
+// This is the entry point the Android/iOS layer must call when the user (or
+// the OS) turns the VPN off. Internal callers that only want to recycle the
+// client without killing the supervisor must use stopClient instead.
 func Stop() {
+	stopSupervisor()
+	stopClient()
+	xray.Stop()
+	markDNSCoreRunning(false)
+}
+
+// stopClientTimeout bounds how long stopClient waits for a graceful teardown.
+//
+// The carrier spends a couple of seconds telling the SFU that we are leaving,
+// and that is the right thing to do: a ghost participant left behind poisons
+// the next join. But the wait is only useful when something is waiting on the
+// result. Switching profiles is the opposite case - the user is staring at a
+// tunnel that has not come back yet - and the old session's teardown finishes
+// perfectly well on its own in the background.
+//
+// Cutting the wait short is safe because RunWithReady closes the local SOCKS
+// listener before it starts tearing the carrier down (LIFO defer order), so
+// the port the next profile needs is already free by the time we get here.
+const stopClientTimeout = 1500 * time.Millisecond
+
+// stopClient cancels the current client run and waits, briefly, for it to
+// finish. It leaves the supervisor lifecycle untouched.
+func stopClient() {
 	mu.Lock()
 	cancelFunc := cancel
 	doneCh := done
+	// Слот освобождается немедленно, не дожидаясь конца разрыва. Иначе
+	// следующий Start видит cancel != nil, возвращает errAlreadyRunning, и
+	// смена профиля падает с «не удалось сменить сервер» ровно в тех случаях,
+	// когда старая сессия закрывается медленно.
+	cancel = nil
 	mu.Unlock()
 
 	if cancelFunc == nil {
@@ -695,15 +791,119 @@ func Stop() {
 
 	cancelFunc()
 
-	if doneCh != nil {
-		<-doneCh
+	if doneCh == nil {
+		return
+	}
+
+	select {
+	case <-doneCh:
+	case <-time.After(stopClientTimeout):
+		log.Printf("client teardown still running after %s - continuing without it", stopClientTimeout)
 	}
 }
 
-// IsRunning returns true if the WhiteNet client is active.
+// --- Supervisor lifecycle -------------------------------------------------
+//
+// StartVPN/StartVPNAndroid spawn a goroutine that watches the client session
+// and restarts it if it dies. That goroutine used to run for the lifetime of
+// the process: after Stop() it immediately observed "not running" and brought
+// the tunnel back up, so a user-initiated disconnect (Android notification,
+// iOS Control Center, another VPN app taking over) was undone within seconds.
+// The supervisor is now scoped to a context that Stop() cancels.
+
+var (
+	supervisorMu     sync.Mutex         //nolint:gochecknoglobals // package-level state intentional
+	supervisorCancel context.CancelFunc //nolint:gochecknoglobals // package-level state intentional
+)
+
+// newSupervisorContext cancels any previous supervisor and returns a fresh
+// context scoped to this start.
+func newSupervisorContext() context.Context {
+	supervisorMu.Lock()
+	defer supervisorMu.Unlock()
+
+	if supervisorCancel != nil {
+		supervisorCancel()
+	}
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	supervisorCancel = cancelFunc
+
+	return ctx
+}
+
+// stopSupervisor terminates the running supervisor loop, if any.
+func stopSupervisor() {
+	supervisorMu.Lock()
+	cancelFunc := supervisorCancel
+	supervisorCancel = nil
+	supervisorMu.Unlock()
+
+	if cancelFunc != nil {
+		cancelFunc()
+	}
+}
+
+// sleepOrDone waits for d, or returns false as soon as ctx is cancelled.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// MemStats returns a one-line snapshot of the Go runtime's memory use.
+//
+// Meant for the tunnel's own log. On iOS the extension is killed without any
+// warning once the process crosses its memory limit, so the last line written
+// before the log simply stops is the only evidence of what happened. Print it
+// periodically and a memory kill becomes obvious instead of looking like the
+// VPN switching itself off.
+func MemStats() string {
+	var m goruntime.MemStats
+	goruntime.ReadMemStats(&m)
+
+	const megabyte = 1024 * 1024
+
+	return fmt.Sprintf(
+		"go: heap=%.1fMB sys=%.1fMB stacks=%.1fMB goroutines=%d gc=%d",
+		float64(m.HeapAlloc)/megabyte,
+		float64(m.Sys)/megabyte,
+		float64(m.StackSys)/megabyte,
+		goruntime.NumGoroutine(),
+		m.NumGC,
+	)
+}
+
+// dnsCoreRunning tracks the MasterDNS tunnel.
+//
+// That core does not go through the Start/Stop singleton - it owns its own
+// runtime - so `cancel` says nothing about it. Without this flag IsRunning
+// reports false for a perfectly healthy DNS profile, and callers that use it
+// as a health check (the iOS extension's wake handler, for one) tear the
+// client down and rebuild it on every wake.
+var dnsCoreRunning atomic.Bool //nolint:gochecknoglobals // package-level state intentional
+
+// markDNSCoreRunning records whether the MasterDNS tunnel is the active core.
+func markDNSCoreRunning(running bool) {
+	dnsCoreRunning.Store(running)
+}
+
+// IsRunning returns true if any tunnel core is active - the WhiteNet client,
+// the Xray instance or the MasterDNS tunnel.
 func IsRunning() bool {
+	if xray.IsRunning() || dnsCoreRunning.Load() {
+		return true
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
+
 	return cancel != nil
 }
 
@@ -726,9 +926,9 @@ func ensureDefaultConfigLocked() {
 			socksListenHost:  defaultSocksHost,
 			vp8FPS:           60,
 			vp8BatchSize:     8,
-			livenessInterval: control.DefaultInterval,
-			livenessTimeout:  control.DefaultTimeout,
-			livenessFailures: control.DefaultFailures,
+			livenessInterval: mobileLivenessInterval,
+			livenessTimeout:  mobileLivenessTimeout,
+			livenessFailures: mobileLivenessFailures,
 		}
 	})
 }

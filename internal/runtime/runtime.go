@@ -13,6 +13,7 @@ import (
 
 	"github.com/thehavlok/whitenet/internal/control"
 	"github.com/thehavlok/whitenet/internal/crypto"
+	"github.com/thehavlok/whitenet/internal/memprofile"
 	"github.com/thehavlok/whitenet/internal/transport"
 	"github.com/xtaci/smux"
 )
@@ -70,11 +71,33 @@ func SmuxConfig(maxWirePayload int) *smux.Config {
 			cfg.MaxFrameSize = maxFrameSize
 		}
 	}
-	cfg.MaxReceiveBuffer = 16 * 1024 * 1024
-	cfg.MaxStreamBuffer = 1024 * 1024
+	applySmuxBuffers(cfg)
 	cfg.KeepAliveInterval = 10 * time.Second
 	cfg.KeepAliveTimeout = 30 * time.Second
 	return cfg
+}
+
+// applySmuxBuffers sizes the receive windows for the host.
+//
+// These are local, receive-side windows: smux v2 does its own flow control,
+// so shrinking them only applies backpressure to the peer. No matching change
+// is needed on the server, and desktop clients are unaffected.
+//
+// The mobile numbers are not a guess at "less": with the carrier's wire paced
+// to roughly 1.2 MB/s, a 4 MB session window is still about three seconds of
+// buffering, and a 256 KB stream window saturates any realistic link at phone
+// RTTs. What they remove is the *ceiling* - the old 1 MB per stream across
+// dozens of concurrent connections was free to grow past what a packet tunnel
+// extension is allowed to hold.
+func applySmuxBuffers(cfg *smux.Config) {
+	if memprofile.IsMobile() {
+		cfg.MaxReceiveBuffer = 4 * 1024 * 1024
+		cfg.MaxStreamBuffer = 256 * 1024
+		return
+	}
+
+	cfg.MaxReceiveBuffer = 16 * 1024 * 1024
+	cfg.MaxStreamBuffer = 1024 * 1024
 }
 
 // MaxPayload reports the transport's per-message payload limit. Returns 0

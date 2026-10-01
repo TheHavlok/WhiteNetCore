@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- The panel rewrites this with the path it mounted the interface at.
+         Without it, the relative asset URLs below would resolve against the
+         current route, so /admin/users/1 would ask for
+         /admin/users/assets/... and get nothing. -->
+    <base href="__WN_BASE_PATH__/" />
+    <title>WhiteNet</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- The panel can be served from any path, including an unguessable one.
+         It rewrites this placeholder with the real mount point when it serves
+         the page, so one build works anywhere without being rebuilt. -->
+    <script>
+      window.__WN_BASE__ = "__WN_BASE_PATH__";
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

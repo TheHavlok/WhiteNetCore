@@ -5,12 +5,12 @@ package mobile
 import "C"
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/proxy"
 	"gopkg.in/yaml.v3"
 
+	"github.com/thehavlok/whitenet/internal/memprofile"
 	masterdnsvpn_client "github.com/thehavlok/whitenet/masterdnsvpn/client"
 	masterdnsvpn_config "github.com/thehavlok/whitenet/masterdnsvpn/config"
 )
@@ -63,10 +64,17 @@ type yamlConfig struct {
 	Debug bool `yaml:"debug"`
 }
 
+const maxConcurrentTCP = 64 // limit simultaneous TCP connections to save memory
+
+// iosSoftMemoryLimit keeps the Go heap comfortably under the NEPacketTunnelProvider
+// jetsam ceiling so the extension is not killed mid-session.
+const iosSoftMemoryLimit = 34 << 20
+
 var (
 	tunOnce      sync.Once
 	activeClient *Client
 	pipe         *swiftPipe
+	tcpSem       chan struct{} // semaphore for TCP concurrency
 )
 
 // swiftPipe bridges Swift byte array boundaries into a standard io.ReadWriter
@@ -77,8 +85,8 @@ type swiftPipe struct {
 
 func newSwiftPipe() *swiftPipe {
 	return &swiftPipe{
-		in:  make(chan []byte, 1024),
-		out: make(chan []byte, 1024),
+		in:  make(chan []byte, 256),
+		out: make(chan []byte, 256),
 	}
 }
 
@@ -105,6 +113,13 @@ func (p *swiftPipe) Write(b []byte) (int, error) {
 // initTUN sets up the gvisor stack for tun2socks.
 func initTUN() {
 	tunOnce.Do(func() {
+		// Семафор создаётся здесь, а не в StartVPN: StartVPN теперь может быть
+		// вызван повторно (перезапуск клиента на месте при пробуждении или
+		// смене профиля), а соединения предыдущей сессии ещё живы. Они вернут
+		// свой токен через <-tcpSem уже в НОВЫЙ канал и либо исчерпают его,
+		// либо заблокируются на пустом.
+		tcpSem = make(chan struct{}, maxConcurrentTCP)
+
 		pipe = newSwiftPipe()
 
 		// Create gVisor link endpoint based on our swift pipe
@@ -155,17 +170,25 @@ func (h *tunHandler) HandleTCP(conn adapter.TCPConn) {
 		return
 	}
 
+	// Limit concurrent TCP connections to prevent memory exhaustion
+	select {
+	case tcpSem <- struct{}{}:
+	default:
+		// Too many connections — reject this one
+		_ = conn.Close()
+		return
+	}
+
 	target := conn.LocalAddr().(*net.TCPAddr)
 	host := target.IP.String()
 	port := target.Port
-
-	log.Printf("tun2socks intercepting TCP -> %s:%d", host, port)
 
 	// Dial the local SOCKS5 proxy provided by whitenet
 	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", activeClient.socksPort), nil, proxy.Direct)
 	if err != nil {
 		log.Printf("failed to create socks proxy dialer: %v", err)
 		_ = conn.Close()
+		<-tcpSem
 		return
 	}
 
@@ -173,20 +196,33 @@ func (h *tunHandler) HandleTCP(conn adapter.TCPConn) {
 	if err != nil {
 		log.Printf("tunnel dial failed for %s:%d: %v", host, port, err)
 		_ = conn.Close()
+		<-tcpSem
 		return
 	}
 
-	// Bidirectional copy (two independent goroutines, non-blocking)
+	// Use small 4KB buffers instead of default 32KB to save memory on iOS
+	buf1 := make([]byte, 4096)
+	buf2 := make([]byte, 4096)
+
+	// Bidirectional copy with a WaitGroup to release semaphore when both directions finish
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
-		defer conn.Close()
-		defer remoteConn.Close()
-		_, _ = io.Copy(remoteConn, conn) // Local -> Remote
+		defer wg.Done()
+		_, _ = io.CopyBuffer(remoteConn, conn, buf1) // Local -> Remote
 	}()
 
 	go func() {
-		defer conn.Close()
-		defer remoteConn.Close()
-		_, _ = io.Copy(conn, remoteConn) // Remote -> Local
+		defer wg.Done()
+		_, _ = io.CopyBuffer(conn, remoteConn, buf2) // Remote -> Local
+	}()
+
+	go func() {
+		wg.Wait()
+		_ = conn.Close()
+		_ = remoteConn.Close()
+		<-tcpSem // release slot
 	}()
 }
 
@@ -196,7 +232,36 @@ func (h *tunHandler) HandleUDP(conn adapter.UDPConn) {
 }
 
 // StartVPN is the main entry point for the iOS TUN mode.
-func StartVPN(yamlString string) (*Client, error) {
+func StartVPN(config string) (*Client, error) {
+	// См. StartVPNAndroid: тип профиля определяется по формату конфига.
+	if IsXrayConfig(config) {
+		return startXrayIOS(config)
+	}
+
+	yamlString := config
+
+	// Aggressive GC: iOS Network Extensions run under a hard jetsam limit
+	// (50 MB for a packet tunnel provider). Going over it kills the
+	// extension, which the OS reports to the app as an unexpected
+	// disconnect -- one of the main reasons the tunnel kept dropping.
+	// A soft memory limit makes the Go GC work harder well before the
+	// extension reaches the ceiling.
+	debug.SetGCPercent(20)
+	debug.SetMemoryLimit(iosSoftMemoryLimit)
+
+	// Стек tun2socks и семафор соединений поднимаются один раз на процесс.
+	// Вызывать initTUN здесь безопасно: внутри sync.Once.
+	initTUN()
+
+	// Переключает smux на мобильные размеры буферов: десктопные 16 МБ на
+	// сессию и 1 МБ на поток в расширение с лимитом 50 МБ не помещаются.
+	memprofile.SetMobile(true)
+
+	// Scope every background loop started below to this run, so Stop()
+	// (called from stopTunnel) actually stops them instead of letting the
+	// supervisor immediately reconnect.
+	supCtx := newSupervisorContext()
+
 	var cfg yamlConfig
 	if err := yaml.Unmarshal([]byte(yamlString), &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse yaml: %w", err)
@@ -222,6 +287,10 @@ func StartVPN(yamlString string) (*Client, error) {
 		port = 10808 // fallback port
 	}
 
+	// Предыдущее ядро могло ещё не отпустить порт: профили часто делят один
+	// и тот же. Проверка готовности приняла бы его слушатель за наш.
+	waitForPortFree(port, portFreeTimeout)
+
 	clientID := cfg.Room.Channel
 	if clientID == "" {
 		clientID = fmt.Sprintf("ios-client-%d", time.Now().UnixNano())
@@ -241,7 +310,12 @@ func StartVPN(yamlString string) (*Client, error) {
 			"DOMAINS": ["%s"],
 			"ENCRYPTION_KEY": "%s",
 			"LISTEN_IP": "127.0.0.1",
-			"LISTEN_PORT": %d
+			"LISTEN_PORT": %d,
+			"MAX_DOWNLOAD_MTU": 2500,
+			"RX_TX_WORKERS": 12,
+			"TUNNEL_PROCESS_WORKERS": 4,
+			"ARQ_WINDOW_SIZE": 1500,
+			"PACKET_DUPLICATION_COUNT": 1
 		}`, domain, cfg.Crypto.Key, port)
 
 		b64 := base64.StdEncoding.EncodeToString([]byte(jsonStr))
@@ -271,10 +345,47 @@ func StartVPN(yamlString string) (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to start MasterDnsVPN: %w", err)
 		}
+		markDNSCoreRunning(true)
+
 		go func() {
-			err := app.Run(context.Background())
-			if err != nil {
-				log.Printf("MasterDnsVPN Error: %v", err)
+			// Пока этот цикл жив, активное ядро — MasterDNS. IsRunning должен
+			// это видеть: иначе внешние проверки здоровья считают туннель мёртвым.
+			defer markDNSCoreRunning(false)
+
+			for {
+				if supCtx.Err() != nil {
+					log.Println("MasterDnsVPN supervisor stopped")
+					return
+				}
+
+				err := app.Run(supCtx)
+
+				if supCtx.Err() != nil {
+					log.Println("MasterDnsVPN stopped by user")
+					return
+				}
+
+				if err != nil {
+					log.Printf("MasterDnsVPN Error: %v — will auto-reconnect in 3s", err)
+				} else {
+					log.Println("MasterDnsVPN exited cleanly — will auto-reconnect in 3s")
+				}
+
+				if !sleepOrDone(supCtx, 3*time.Second) {
+					return
+				}
+
+				// Re-bootstrap a fresh client instance
+				newApp, bootstrapErr := masterdnsvpn_client.BootstrapLoadedConfig(appCfg, "")
+				if bootstrapErr != nil {
+					log.Printf("MasterDnsVPN reconnect bootstrap failed: %v — retrying in 5s", bootstrapErr)
+					if !sleepOrDone(supCtx, 5*time.Second) {
+						return
+					}
+					continue
+				}
+				app = newApp
+				log.Println("MasterDnsVPN reconnected successfully!")
 			}
 		}()
 	} else {
@@ -300,6 +411,53 @@ func StartVPN(yamlString string) (*Client, error) {
 			Stop() // clean up
 			return nil, fmt.Errorf("whitenet not ready: %w", err)
 		}
+
+		// Auto-reconnect: monitor the session and restart if it dies.
+		// internal/client reconnects the carrier on its own and keeps the SOCKS
+		// listener up, so this loop only has to cover the case where the whole
+		// run ends. It is scoped to supCtx so Stop() ends it: previously it ran
+		// forever and resurrected the client seconds after the user (or the OS)
+		// shut the tunnel down.
+		go func() {
+			for {
+				if !sleepOrDone(supCtx, 3*time.Second) {
+					log.Println("StartVPN: supervisor stopped")
+					return
+				}
+
+				if IsRunning() {
+					continue
+				}
+
+				log.Println("StartVPN: session died, attempting auto-reconnect...")
+
+				if !sleepOrDone(supCtx, 2*time.Second) {
+					return
+				}
+
+				reconnErr := Start(
+					cfg.Auth.Provider,
+					cfg.Room.ID,
+					clientID,
+					cfg.Crypto.Key,
+					port,
+					cfg.Socks.User,
+					cfg.Socks.Pass,
+				)
+				if reconnErr != nil {
+					log.Printf("StartVPN: reconnect Start failed: %v", reconnErr)
+					continue
+				}
+
+				if waitErr := WaitReady(30000); waitErr != nil {
+					log.Printf("StartVPN: reconnect WaitReady failed: %v", waitErr)
+					stopClient()
+					continue
+				}
+
+				log.Println("StartVPN: reconnected successfully!")
+			}
+		}()
 	}
 
 	log.Printf("StartVPN: SOCKS5 proxy ready on 127.0.0.1:%d", port)

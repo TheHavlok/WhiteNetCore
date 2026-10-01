@@ -1,0 +1,162 @@
+// Desired state of a single node.
+//
+// Main owns this structure: it is rendered from the database whenever
+// something that affects a node changes, stamped with a monotonically
+// increasing version, and handed to the agent. The agent never computes
+// state of its own - it only applies what it is given and reports back
+// which version it managed to apply.
+syntax = "proto3";
+
+package whitenet.node.v1;
+
+option go_package = "github.com/thehavlok/whitenet/internal/nodepb;nodepb";
+
+// Core is one of the three engines an agent supervises on a node.
+enum Core {
+  CORE_UNSPECIFIED = 0;
+  CORE_XRAY = 1;      // xray-core, every classic protocol
+  CORE_WNDNS = 2;     // WhiteNet DNS tunnel (masterdnsvpn)
+  CORE_OPENFLUX = 3;  // OpenFlux exit node
+}
+
+// Protocol identifies what an inbound speaks. Everything up to
+// PROTOCOL_HYSTERIA2 is served by xray-core; PROTOCOL_WNDNS is served by the
+// DNS tunnel. OpenFlux is not an inbound at all (see OpenFluxConfig) because
+// it has no listening port and no multi-user model.
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_VLESS = 1;
+  PROTOCOL_VMESS = 2;
+  PROTOCOL_TROJAN = 3;
+  PROTOCOL_SHADOWSOCKS = 4;
+  PROTOCOL_SHADOWSOCKS_2022 = 5;
+  PROTOCOL_HYSTERIA2 = 6;
+  PROTOCOL_WNDNS = 7;
+}
+
+// NodeState is the complete, self-contained description of what a node must
+// be running. It is idempotent: applying the same state twice is a no-op,
+// and a node that was offline for a week converges by applying the newest
+// state it receives.
+message NodeState {
+  // Version increases strictly monotonically per node. The agent persists it
+  // and reports it on reconnect so Main can skip a resend.
+  uint64 version = 1;
+
+  string node_uuid = 2;
+
+  // Inbounds the node must serve, across all cores.
+  repeated Inbound inbounds = 3;
+
+  // Users allowed on this node, already filtered by group membership and
+  // status. An empty list is legitimate and means "serve no one".
+  repeated User users = 4;
+
+  // OpenFlux exit configuration; absent means the OpenFlux core stays down.
+  OpenFluxConfig openflux = 5;
+
+  // Knobs that are not tied to a single inbound.
+  NodeSettings settings = 6;
+}
+
+message NodeSettings {
+  // How often the agent sends a heartbeat. Main is the single source of
+  // truth for the interval so it can be retuned centrally.
+  uint32 heartbeat_interval_seconds = 1;
+  // How often traffic counters are read from Xray and shipped to Main.
+  uint32 traffic_report_interval_seconds = 2;
+  // How often host metrics are sampled and shipped.
+  uint32 metrics_interval_seconds = 3;
+  // Xray log level: debug, info, warning, error, none.
+  string xray_log_level = 4;
+  // Pinned core versions; empty means "whatever is installed".
+  string xray_version = 5;
+  string openflux_version = 6;
+}
+
+// Inbound is one listening endpoint. Params and Secrets are deliberately
+// loose maps rather than a per-protocol message: Main already validated them
+// against the protocol's schema, and keeping the wire format open means a new
+// Xray knob does not require a proto change plus an agent rollout.
+message Inbound {
+  // Stable identity. Tag is what Xray sees and what traffic counters are
+  // keyed by, so it must never change for a live inbound.
+  string tag = 1;
+  uint64 id = 2;
+  Protocol protocol = 3;
+  Core core = 4;
+
+  bool enabled = 5;
+  uint32 listen_port = 6;
+  string listen_address = 7;  // empty means all interfaces
+
+  // Transport and TLS, e.g. network=raw|xhttp|ws|grpc|httpupgrade|kcp,
+  // security=none|tls|reality. Protocol-specific keys live here too
+  // (sni, dest, fingerprint, path, serviceName, obfs, ...).
+  map<string, string> params = 8;
+
+  // Secret material: reality private key, certificates, the DNS tunnel's
+  // encryption key. Encrypted at rest on Main and only ever sent over mTLS.
+  map<string, string> secrets = 9;
+
+  // For PROTOCOL_WNDNS: the tag of the Xray inbound this tunnel forwards
+  // every stream to. That chain is what gives the DNS protocol per-user
+  // authentication, traffic accounting and limits, none of which the DNS
+  // protocol has on its own.
+  string forward_to_tag = 10;
+}
+
+// User is one account as a node needs to see it: identity plus the secrets
+// required by whichever protocols the node serves. Limits are not sent -
+// enforcement lives on Main, which simply removes the user from the state
+// when they run out.
+message User {
+  uint64 id = 1;
+  string uuid = 2;
+  // Email is Xray's user key; it is what StatsService reports traffic under.
+  // Format: "<id>.<uuid-prefix>@whitenet" - synthetic, never a real address.
+  string email = 3;
+
+  // VLESS/VMess identity.
+  string vless_uuid = 4;
+  // Trojan and Hysteria2 share one password per user.
+  string password = 5;
+  // Shadowsocks (including 2022) key/password, base64 for 2022 methods.
+  string ss_password = 6;
+
+  // Per-user Xray flow for VLESS, e.g. xtls-rprx-vision. Usually empty and
+  // taken from the inbound.
+  string flow = 7;
+}
+
+// OpenFluxConfig describes the exit process and its channel pool.
+//
+// OpenFlux has no user model and exactly one client per session, so a node
+// serves it as a pool of pre-provisioned channels that Main leases out. The
+// agent's job is to keep the exit process alive for every enabled channel and
+// to report which channels are actually carrying a session.
+message OpenFluxConfig {
+  bool enabled = 1;
+  // l3 (Linux, raw sockets, needs root) or l4 (gVisor, portable).
+  string mode = 2;
+  repeated OpenFluxChannel channels = 3;
+}
+
+message OpenFluxChannel {
+  uint64 id = 1;
+  string uuid = 2;
+  bool enabled = 3;
+
+  // Transport type: yandex, vyandex, boards, oneme, cupsonline, mailru,
+  // direct, phpbox.
+  string transport = 4;
+  // The rendezvous: document URL, room, or listen address for direct.
+  string url = 5;
+  // Transport-specific extras (direct_listen, share_host, cookies, ...).
+  map<string, string> params = 6;
+
+  // AES-256-GCM shared secret, hex, and the KDF context. Rotating the key is
+  // how Main revokes a channel: the running session stops decrypting.
+  string encryption_key = 7;
+  string session_context = 8;
+}

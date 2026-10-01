@@ -1,0 +1,62 @@
+# WhiteNet panel configuration.
+#
+# Copy to main.toml and fill in. Every value can be overridden through the
+# environment with the WN_ prefix, which is how Docker Compose supplies the
+# secrets: WN_MASTER_KEY, WN_DB_PASSWORD, WN_DB_HOST, ...
+#
+# Generate the master key with:  wn-main genkey
+# It protects every secret in the database. Back it up; losing it means losing
+# every Reality private key and user password.
+master_key = ""
+
+[database]
+host = "127.0.0.1"
+port = 3306
+name = "whitenet"
+user = "whitenet"
+password = ""            # prefer WN_DB_PASSWORD
+max_open_conns = 25
+max_idle_conns = 5
+conn_max_lifetime = "30m"
+
+[http]
+# The reverse proxy in front terminates TLS and forwards here.
+listen = "127.0.0.1:8080"
+# The admin UI can live on an unguessable path.
+panel_path = "/admin"
+# Leave empty to answer on any host name. Set both to keep the panel and the
+# subscription links on separate domains.
+panel_domain = ""
+sub_domain = ""
+# Whose X-Forwarded-For to believe. Rate limiting and the device ledger depend
+# on a truthful client address.
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+read_timeout = "30s"
+write_timeout = "30s"
+
+[grpc]
+# Where agents connect. Mutual TLS, so it must not sit behind an HTTP proxy.
+listen = "0.0.0.0:8443"
+# What goes into the install command. Defaults to the panel's own host.
+advertise = ""
+
+[node]
+heartbeat_interval = "15s"
+offline_after = "60s"
+metrics_interval = "30s"
+traffic_report_interval = "60s"
+cert_ttl = "365d"
+token_ttl = "24h"
+# How long an OpenFlux channel stays leased without a renewal.
+openflux_lease_ttl = "5m"
+
+[retention]
+raw_metrics = "48h"
+hourly_metrics = "90d"
+events = "30d"
+traffic_daily = "365d"
+admin_audit = "365d"
+
+[log]
+level = "info"           # debug, info, warn, error
+format = "text"          # text or json

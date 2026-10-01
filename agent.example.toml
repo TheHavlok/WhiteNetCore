@@ -1,0 +1,42 @@
+# WhiteNet node agent configuration.
+#
+# Deliberately tiny: inbounds, users, keys and which cores run are desired
+# state pushed by Main, so none of it belongs in a file on the node.
+# The install script writes this file.
+
+# Main's agent endpoint, host:port.
+main = "panel.example.com:8443"
+
+# The one-time enrolment token. The agent clears it from this file once
+# enrolment succeeds, so a stale copy cannot be reused.
+token = ""
+
+# Main's CA fingerprint, pinned at install time.
+ca_fingerprint = ""
+
+data_dir = "/var/lib/whitenet-agent"
+bin_dir = "/usr/local/lib/whitenet-agent/bin"
+
+[reconnect]
+initial_delay = "1s"
+max_delay = "5m"
+multiplier = 2.0
+# Spreads reconnects so a fleet does not retry in lockstep after Main restarts.
+jitter = 0.2
+timeout = "20s"
+
+[cores]
+xray_binary = "xray"
+wndns_binary = "whitenet"
+openflux_binary = "openflux"
+# Xray's gRPC API: adds and removes users without a restart and reads traffic
+# counters. Must stay on the loopback interface.
+xray_api_address = "127.0.0.1:10085"
+restart_backoff = "2s"
+restart_backoff_max = "2m"
+start_timeout = "15s"
+stop_timeout = "10s"
+
+[log]
+level = "info"
+format = "text"

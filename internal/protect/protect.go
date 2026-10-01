@@ -56,6 +56,14 @@ func controlFunc(network, _ string, c syscall.RawConn) error {
 	return err
 }
 
+// Control is controlFunc exported for callers that need to hand a raw socket
+// controller to another library - xray-core's dialer controller, for one.
+// It matches the func(network, address string, c syscall.RawConn) error shape
+// those APIs expect and is a no-op when no Protector is installed.
+func Control(network, address string, c syscall.RawConn) error {
+	return controlFunc(network, address, c)
+}
+
 // NewDialer returns a net.Dialer that calls Protector on each new socket.
 func NewDialer() *net.Dialer {
 	return &net.Dialer{

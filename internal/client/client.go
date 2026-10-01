@@ -104,6 +104,18 @@ type Config struct {
 
 	// OnHealth receives liveness/reconnect status updates. Nil means no-op.
 	OnHealth HealthFunc
+
+	// NetworkChange signals that the host's default network changed (Wi-Fi to
+	// cellular, a new IP after a cell handover, a Wi-Fi reconnect). The client
+	// then rebuilds the carrier immediately instead of waiting for ICE to
+	// reach its failed timeout (~25s with pion defaults) or for the liveness
+	// probe to give up (~25s on top of that).
+	//
+	// This matters most on mobile: the UDP sockets the engine holds stay bound
+	// to an interface that has gone away, so nothing recovers until a timeout
+	// expires. Platform code sends on this channel from ConnectivityManager
+	// (Android) or NWPathMonitor (iOS). Nil disables the watcher.
+	NetworkChange <-chan struct{}
 }
 
 // Run starts the client with the given configuration.
@@ -164,9 +176,65 @@ func RunWithReady(ctx context.Context, cfg Config, onReady func()) error {
 	}
 
 	go c.acceptLoop(runCtx, listener)
+	go c.watchNetworkChanges(runCtx, cfg, cancel)
 
 	<-runCtx.Done()
 	return nil
+}
+
+// watchNetworkChanges rebuilds the carrier as soon as the host reports that the
+// default network changed, rather than waiting for a timeout to notice.
+//
+// A single handover produces a burst of callbacks, and rebuilding once per
+// callback would be worse than not reacting at all, so events are coalesced and
+// rate-limited.
+func (c *Client) watchNetworkChanges(ctx context.Context, cfg Config, cancel context.CancelFunc) {
+	if cfg.NetworkChange == nil {
+		return
+	}
+
+	const (
+		coalesceWindow = 700 * time.Millisecond
+		minInterval    = 3 * time.Second
+	)
+
+	var lastRebuild time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-cfg.NetworkChange:
+			if !ok {
+				return
+			}
+		}
+
+		// Swallow the rest of the burst before acting on it.
+		settle := time.After(coalesceWindow)
+	coalesce:
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-cfg.NetworkChange:
+				if !ok {
+					return
+				}
+			case <-settle:
+				break coalesce
+			}
+		}
+
+		if time.Since(lastRebuild) < minInterval {
+			logger.Debugf("client: network change ignored (rebuilt %s ago)", time.Since(lastRebuild))
+			continue
+		}
+		lastRebuild = time.Now()
+
+		logger.Infof("client: default network changed - rebuilding carrier")
+		c.handleReconnect(ctx, cfg, cancel, "network")
+	}
 }
 
 func (c *Client) bringUpLink(
@@ -369,8 +437,12 @@ func (c *Client) handleReconnect(ctx context.Context, cfg Config, cancel context
 	// Re-handshaking over the dead carrier just times out repeatedly, so
 	// ask the carrier to rebuild itself; the new carrier will fire its own
 	// reconnect callback which then drives a fresh handshake.
-	if reason == "liveness" && c.ln != nil {
-		c.ln.Reconnect("liveness")
+	// A network change has the same shape as a liveness loss: the carrier's
+	// sockets are dead even though the engine still believes it is connected,
+	// so re-handshaking over the old link would only time out. Ask the carrier
+	// to rebuild itself and let its reconnect callback drive the handshake.
+	if (reason == "liveness" || reason == "network") && c.ln != nil {
+		c.ln.Reconnect(reason)
 		// Return immediately - retryHandshake over the dead link would
 		// loop forever with "open control stream: timeout" while holding
 		// reconnectMu, blocking the carrier callback that fires once the
