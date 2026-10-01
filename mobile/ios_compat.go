@@ -11,6 +11,8 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +56,11 @@ type yamlConfig struct {
 	} `yaml:"net"`
 	MasterDns struct {
 		Domains []string `yaml:"domains"`
+		// Method is the tunnel's encryption method, which has to match the
+		// server's: 0 none, 1 XOR, 2 ChaCha20, 3-5 AES-128/192/256-GCM. The
+		// key length is fixed per method, so a mismatch fails at the
+		// handshake rather than degrading.
+		Method int `yaml:"method"`
 	} `yaml:"masterdns"`
 	Socks struct {
 		Host string `yaml:"host"`
@@ -273,7 +280,7 @@ func StartVPN(config string) (*Client, error) {
 	if cfg.Debug {
 		SetDebug(true)
 	}
-	
+
 	if cfg.Net.Transport != "" {
 		SetTransport(cfg.Net.Transport)
 	}
@@ -300,14 +307,28 @@ func StartVPN(config string) (*Client, error) {
 
 	if cfg.Auth.Provider == "dns" || cfg.Net.Transport == "dns" {
 		// Launch MasterDnsVPN
-		domain := ""
-		if len(cfg.MasterDns.Domains) > 0 {
-			domain = cfg.MasterDns.Domains[0]
+		// Every domain, not just the first: a resolver that rate-limits one
+		// of them still leaves the others, which is the reason the panel
+		// lets an operator delegate several.
+		domains := make([]string, 0, len(cfg.MasterDns.Domains))
+		for _, domain := range cfg.MasterDns.Domains {
+			if domain = strings.TrimSpace(domain); domain != "" {
+				domains = append(domains, strconv.Quote(domain))
+			}
 		}
-		
+		if len(domains) == 0 && cfg.Room.ID != "" {
+			// Older profiles put the single domain in room.id, so that is
+			// still honoured rather than failing a config that used to work.
+			domains = append(domains, strconv.Quote(cfg.Room.ID))
+		}
+		if len(domains) == 0 {
+			return nil, fmt.Errorf("the DNS profile names no domain to tunnel through")
+		}
+
 		jsonStr := fmt.Sprintf(`{
 			"PROTOCOL_TYPE": "SOCKS5",
-			"DOMAINS": ["%s"],
+			"DOMAINS": [%s],
+			"DATA_ENCRYPTION_METHOD": %d,
 			"ENCRYPTION_KEY": "%s",
 			"LISTEN_IP": "127.0.0.1",
 			"LISTEN_PORT": %d,
@@ -316,7 +337,7 @@ func StartVPN(config string) (*Client, error) {
 			"TUNNEL_PROCESS_WORKERS": 4,
 			"ARQ_WINDOW_SIZE": 1500,
 			"PACKET_DUPLICATION_COUNT": 1
-		}`, domain, cfg.Crypto.Key, port)
+		}`, strings.Join(domains, ", "), encryptionMethod(cfg.MasterDns.Method), cfg.Crypto.Key, port)
 
 		b64 := base64.StdEncoding.EncodeToString([]byte(jsonStr))
 
@@ -403,7 +424,7 @@ func StartVPN(config string) (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to start whitenet: %w", err)
 		}
-		
+
 		// Wait for SOCKS5 server to come up (30s for WebRTC negotiation)
 		log.Println("StartVPN: waiting for SOCKS5 proxy to become ready...")
 		if err := WaitReady(30000); err != nil {
@@ -468,4 +489,3 @@ func StartVPN(config string) (*Client, error) {
 	activeClient = &Client{socksPort: port}
 	return activeClient, nil
 }
-

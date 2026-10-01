@@ -79,7 +79,7 @@ func TestImportTextHandlesALinkAndRubbish(t *testing.T) {
 		Servers: []subscription.Server{{
 			ID: "n:v", Name: "DE-1", Protocol: "vless", Transport: "raw",
 			Address: "198.51.100.1", Port: 443,
-			Params:  map[string]string{"uuid": "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"},
+			Params: map[string]string{"uuid": "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"},
 		}},
 	})
 	if err != nil {

@@ -475,6 +475,14 @@ func dnsProfile(server subscription.Server, opt Options) (*Profile, error) {
 		quoted = append(quoted, strconv.Quote(fmt.Sprint(domain)))
 	}
 
+	method := ""
+	if value := p["encryption_method"]; value != "" {
+		// Inside the masterdns block, not appended at the end: YAML is
+		// indentation-scoped, so a trailing line would land under whatever
+		// section came last and be silently ignored.
+		method = fmt.Sprintf("  method: %s\n", value)
+	}
+
 	outer := fmt.Sprintf(`mode: cnc
 auth:
   provider: dns
@@ -482,7 +490,7 @@ crypto:
   key: %s
 masterdns:
   domains: [%s]
-net:
+%snet:
   transport: dns
 socks:
   host: "127.0.0.1"
@@ -490,11 +498,9 @@ socks:
 `,
 		strconv.Quote(p["encryption_key"]),
 		strings.Join(quoted, ", "),
+		method,
 		opt.ChainSocksPort,
 	)
-	if method := p["encryption_method"]; method != "" {
-		outer += fmt.Sprintf("  method: %s\n", method)
-	}
 
 	// The inner hop has no address of its own: it is reached through the
 	// tunnel, which forwards to whatever the node chained it to. Loopback is
