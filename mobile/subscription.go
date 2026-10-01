@@ -23,11 +23,14 @@ import (
 
 // Server is one connectable server, with its configuration already built.
 type Server struct {
-	ID        string
-	Name      string
-	Country   string
-	Group     string
-	Protocol  string
+	ID      string
+	Name    string
+	Country string
+	Group   string
+	// Proto, not Protocol: "protocol" is a keyword in Swift, and a field by
+	// that name has to be written in backticks at every use. ShareLink made
+	// the same choice for the same reason.
+	Proto     string
 	Transport string
 	Address   string
 	Port      int
@@ -362,7 +365,7 @@ func buildServer(server subscription.Server) *Server {
 		Name:      server.Name,
 		Country:   server.Country,
 		Group:     server.Group,
-		Protocol:  server.Protocol,
+		Proto:     server.Protocol,
 		Transport: server.Transport,
 		Address:   server.Address,
 		Port:      server.Port,
