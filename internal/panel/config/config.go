@@ -225,6 +225,7 @@ func applyEnv(cfg *Config) {
 	envString(&cfg.HTTP.PanelPath, "PANEL_PATH")
 	envString(&cfg.HTTP.PanelDomain, "PANEL_DOMAIN")
 	envString(&cfg.HTTP.SubDomain, "SUB_DOMAIN")
+	envList(&cfg.HTTP.TrustedProxies, "TRUSTED_PROXIES")
 	envString(&cfg.GRPC.Listen, "GRPC_LISTEN")
 	envString(&cfg.GRPC.Advertise, "GRPC_ADVERTISE")
 	envString(&cfg.Log.Level, "LOG_LEVEL")
@@ -235,6 +236,25 @@ func envString(target *string, key string) {
 	if v, ok := os.LookupEnv(EnvPrefix + key); ok {
 		*target = v
 	}
+}
+
+// envList reads a comma-separated list. Compose needs it: the reverse proxy's
+// address inside a Docker network is assigned at run time, so the trusted
+// proxy range cannot be baked into a config file.
+func envList(target *[]string, key string) {
+	v, ok := os.LookupEnv(EnvPrefix + key)
+	if !ok {
+		return
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	// An explicitly empty value means "trust nothing", which is different
+	// from "not set", so the result is assigned either way.
+	*target = out
 }
 
 func envInt(target *int, key string) {

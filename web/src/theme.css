@@ -805,3 +805,13 @@ pre.logs {
   border-color: rgba(59, 130, 246, 0.4);
   color: var(--accent);
 }
+
+/* A server's heading: name, its protocol and transport, and where it listens,
+   on one line that wraps on a phone rather than pushing the link off screen. */
+.row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}

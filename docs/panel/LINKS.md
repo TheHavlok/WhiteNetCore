@@ -271,7 +271,7 @@ keeps the format stable when a new knob appears.
 | `trojan` | `password` |
 | `shadowsocks` | `method`, `password` |
 | `shadowsocks2022` | `method` (a `2022-blake3-*` method), `password` (base64) |
-| `hysteria2` | `auth`, `sni`, `obfs`, `obfs_password`, `up_mbps`, `down_mbps` |
+| `hysteria2` | `auth`, `sni`, `obfs`, `obfs_password`, `up_mbps`, `down_mbps`. These are the client's view: on the node the same obfuscation is configured as a `finalmask` mask of type `salamander`, which is where this Xray version keeps it - see [PROTOCOLS.md](PROTOCOLS.md#hysteria2) |
 | `wndns` | `domains` (comma separated), `encryption_method`, `encryption_key`, plus `chain` |
 | `flux` | nothing; see the `flux` block |
 

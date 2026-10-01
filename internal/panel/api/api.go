@@ -26,6 +26,7 @@ import (
 	"github.com/thehavlok/whitenet/internal/panel/secret"
 	"github.com/thehavlok/whitenet/internal/panel/staterender"
 	"github.com/thehavlok/whitenet/internal/panel/store"
+	"github.com/thehavlok/whitenet/internal/panel/subscription"
 )
 
 // SessionCookie is the name of the admin session cookie.
@@ -41,12 +42,22 @@ const (
 	loginLockDuration     = 15 * time.Minute
 )
 
+// SubscriptionRenderer renders what a user would be served. The admin API
+// needs it to show the same servers the app will see - and a share link for
+// each - without duplicating the rendering rules, which is where the panel and
+// the app would otherwise drift apart. It is an interface so the API package
+// does not depend on the subscription server, and so tests can leave it out.
+type SubscriptionRenderer interface {
+	Render(r *http.Request, user *store.User) (*subscription.Response, error)
+}
+
 // Server holds everything the handlers need.
 type Server struct {
 	store    *store.Store
 	box      *secret.Box
 	rpc      *noderpc.Server
 	renderer *staterender.Renderer
+	sub      SubscriptionRenderer
 	cfg      config.Config
 	log      *slog.Logger
 
@@ -70,6 +81,14 @@ func New(st *store.Store, box *secret.Box, rpc *noderpc.Server, renderer *stater
 		log:          log,
 		loginLimiter: newRateLimiter(20, time.Minute),
 	}
+}
+
+// SetSubscriptionRenderer wires in the renderer after construction, because
+// the subscription server and the API server are built from the same store and
+// neither can be the other's constructor argument without an ordering rule
+// that is easy to get wrong.
+func (s *Server) SetSubscriptionRenderer(renderer SubscriptionRenderer) {
+	s.sub = renderer
 }
 
 // Routes returns the API handler, to be mounted under /api.
@@ -147,6 +166,7 @@ func (s *Server) Routes() http.Handler {
 	authed.HandleFunc("DELETE /users/{id}/devices/{deviceID}", s.handleDeleteDevice)
 	authed.HandleFunc("GET /users/{id}/traffic", s.handleUserTraffic)
 	authed.HandleFunc("GET /users/{id}/subscription", s.handleUserSubscription)
+	authed.HandleFunc("GET /users/{id}/servers", s.handleUserServers)
 	authed.HandleFunc("POST /users/bulk", s.handleBulkUsers)
 
 	authed.HandleFunc("GET /events", s.handleListEvents)

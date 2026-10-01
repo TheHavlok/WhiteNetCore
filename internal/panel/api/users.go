@@ -388,6 +388,63 @@ func (s *Server) handleUserSubscription(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, links)
 }
 
+// handleUserServers lists the servers this user would be served, each with a
+// whitenet:// share link.
+//
+// This is what makes a single protocol on a single node usable on its own: a
+// subscription is the right thing for a real user, but to try a DNS tunnel or
+// a flux channel - or to hand one server to one person - you need the link
+// itself, and deriving it by hand from the inbound's parameters is exactly the
+// kind of transcription that goes wrong.
+func (s *Server) handleUserServers(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	user, err := s.store.UserByID(r.Context(), id)
+	if err != nil {
+		s.writeStoreError(w, err, "the user")
+		return
+	}
+	if s.sub == nil {
+		s.writeError(w, http.StatusNotImplemented, codeInternal,
+			"this panel was built without the subscription renderer")
+		return
+	}
+	doc, err := s.sub.Render(r, user)
+	if err != nil {
+		s.log.Error("could not render a user's servers", "user", user.ID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, codeInternal,
+			"the servers could not be rendered")
+		return
+	}
+
+	out := make([]map[string]any, 0, len(doc.Servers))
+	for _, server := range doc.Servers {
+		entry := map[string]any{
+			"id":        server.ID,
+			"name":      server.Name,
+			"protocol":  server.Protocol,
+			"transport": server.Transport,
+			"address":   server.Address,
+			"port":      server.Port,
+		}
+		// A link that cannot be built is reported per server rather than
+		// failing the list: one unfinished inbound should not hide the rest.
+		if link, err := sharelink.EncodeServer(server.Name, server); err != nil {
+			entry["error"] = err.Error()
+		} else {
+			entry["link"] = link
+		}
+		out = append(out, entry)
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"servers": out,
+		"status":  doc.User.Status,
+	})
+}
+
 // subscriptionLinks assembles the URL, the deep link and the QR code.
 func (s *Server) subscriptionLinks(r *http.Request, token string) (map[string]any, error) {
 	domains, err := s.store.Domains(r.Context())

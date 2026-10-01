@@ -1,0 +1,56 @@
+# TLS is automatic: Caddy gets a certificate for each name below on first
+# request and renews it on its own. Both names must already resolve to this
+# host, or the ACME challenge fails.
+
+# Certificates are issued without an ACME account email, which works. If you
+# want Let's Encrypt to warn you before an expiry, uncomment this and set the
+# address - Caddy rejects an empty one, which is why it is not wired to an
+# environment variable.
+#{
+#	email you@example.com
+#}
+
+# The admin panel.
+{$WN_PANEL_DOMAIN} {
+	encode zstd gzip
+
+	# The panel refuses to serve the admin interface on the subscription host
+	# and the other way round, so routing by name here is belt and braces.
+	reverse_proxy main:8080
+
+	header {
+		# The panel is an application, not a document: nothing should frame it
+		# and nothing should guess at content types.
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# The subscription host. It has to be a different name from the panel: Caddy
+# refuses two site blocks with the same address. To serve both on one name,
+# delete this block and clear WN_SUB_DOMAIN - the panel then answers
+# subscriptions on any host it is asked about.
+{$WN_SUB_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy main:8080
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

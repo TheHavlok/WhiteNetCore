@@ -25,6 +25,7 @@ import type {
   Template,
   TrafficDay,
   User,
+  UserServer,
 } from "./types";
 
 /** The error a failed request throws, carrying the API's machine-readable code. */
@@ -274,6 +275,8 @@ export const api = {
     request<{ days: TrafficDay[] }>("GET", `/users/${id}/traffic${query({ days })}`),
   subscription: (id: number) =>
     request<SubscriptionLinks>("GET", `/users/${id}/subscription`),
+  userServers: (id: number) =>
+    request<{ servers: UserServer[]; status: string }>("GET", `/users/${id}/servers`),
   bulkUsers: (body: {
     user_ids: number[];
     action: string;

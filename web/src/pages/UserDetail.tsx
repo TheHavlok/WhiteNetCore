@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api, RequestError } from "../api";
-import type { Group, SubscriptionLinks, User } from "../types";
+import type { Group, SubscriptionLinks, User, UserServer } from "../types";
 import {
   Banner,
   Card,
@@ -11,6 +11,7 @@ import {
   CopyLine,
   Field,
   Modal,
+  Pill,
   Spinner,
   formatBytes,
   formatDate,
@@ -27,6 +28,7 @@ export default function UserDetail(): ReactNode {
   const groups = useAsync(() => api.groups(), []);
   const devices = useAsync(() => api.devices(id), [id]);
   const subscription = useAsync(() => api.subscription(id), [id]);
+  const servers = useAsync(() => api.userServers(id), [id]);
   const traffic = useAsync(() => api.userTraffic(id, 30), [id]);
 
   const [editing, setEditing] = useState(false);
@@ -41,6 +43,7 @@ export default function UserDetail(): ReactNode {
     user.reload();
     devices.reload();
     subscription.reload();
+    servers.reload();
   };
 
   return (
@@ -132,6 +135,34 @@ export default function UserDetail(): ReactNode {
           </div>
         </Card>
       </div>
+
+      <Card
+        title="Per-server links"
+        actions={<button className="small" onClick={() => servers.reload()}>Refresh</button>}
+      >
+        <p className="muted" style={{ marginTop: 0 }}>
+          One link per server this user can reach, rendered by the same code that answers their
+          subscription - so what is listed here is exactly what the app would receive. A
+          subscription link is the right thing for a real user; these are for trying a protocol,
+          or handing one server to one person.
+        </p>
+        {servers.error ? (
+          <Banner kind="error">{servers.error}</Banner>
+        ) : !servers.data ? (
+          <Spinner />
+        ) : servers.data.servers.length === 0 ? (
+          <div className="empty">
+            Nothing to connect to yet. A server appears here once the user is in a group that has
+            an online node with a published inbound - or a flux channel, or a DNS tunnel.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {servers.data.servers.map((server) => (
+              <ServerLink key={server.id} server={server} />
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Card title={`Devices (${devices.data?.devices.length ?? 0})`}>
         {!devices.data ? (
@@ -340,6 +371,27 @@ function SubscriptionBlock({ links }: { links: SubscriptionLinks }): ReactNode {
         </div>
       )}
     </>
+  );
+}
+
+/** One server with its link. The endpoint is shown too, because a link is
+ *  opaque and an operator checking a port should not have to decode one. */
+function ServerLink({ server }: { server: UserServer }): ReactNode {
+  const where = server.address ? `${server.address}:${server.port}` : "through a carrier";
+  return (
+    <div>
+      <div className="row-head">
+        <strong>{server.name}</strong>
+        <Pill>{server.protocol}</Pill>
+        {server.transport && <Pill>{server.transport}</Pill>}
+        <span className="faint mono">{where}</span>
+      </div>
+      {server.link ? (
+        <CopyLine value={server.link} />
+      ) : (
+        <Banner kind="warn">This server has no link: {server.error}</Banner>
+      )}
+    </div>
   );
 }
 

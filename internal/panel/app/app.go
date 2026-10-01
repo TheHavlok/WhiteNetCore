@@ -101,7 +101,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Hosts:        agentHosts(ctx, st, cfg),
 	})
 
-	return &App{
+	app := &App{
 		cfg:      cfg,
 		log:      log,
 		Store:    st,
@@ -112,7 +112,11 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		RPC:      rpc,
 		API:      api.New(st, box, rpc, renderer, cfg, log),
 		Sub:      subhttp.New(st, box, cfg, log),
-	}, nil
+	}
+	// The admin API shows the servers a user would be served, rendered by the
+	// subscription server itself so the two cannot disagree.
+	app.API.SetSubscriptionRenderer(app.Sub)
+	return app, nil
 }
 
 // Close releases the database.

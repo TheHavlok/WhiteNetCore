@@ -173,6 +173,18 @@ export interface SubscriptionLinks {
   qr_png_base64?: string;
 }
 
+/** One server the user would be served, with a link that carries it alone. */
+export interface UserServer {
+  id: string;
+  name: string;
+  protocol: Protocol | "flux";
+  transport: string;
+  address: string;
+  port: number;
+  link?: string;
+  error?: string;
+}
+
 export interface FluxConfig {
   enabled: boolean;
   mode: "l3" | "l4";

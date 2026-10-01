@@ -18,6 +18,16 @@ import (
 // client a dead server is worse than handing it one fewer. A user who is
 // disabled, expired or out of traffic still gets a document - with no servers
 // - so the app can say why rather than showing a network error.
+// Render renders what a user would be served, for a caller that is not that
+// user: the admin API, which lists the same servers and offers a share link
+// for each one.
+//
+// No device is passed, so looking at a user in the panel never consumes one of
+// their device slots - an administrator opening a page is not a device.
+func (s *Server) Render(r *http.Request, user *store.User) (*subscription.Response, error) {
+	return s.render(r, user, nil)
+}
+
 func (s *Server) render(r *http.Request, user *store.User, deviceID *uint64) (*subscription.Response, error) {
 	settings, err := s.store.SubscriptionSettings(r.Context())
 	if err != nil {

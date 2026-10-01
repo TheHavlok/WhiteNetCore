@@ -163,3 +163,22 @@ func TestLoadWithoutFileUsesDefaultsAndEnv(t *testing.T) {
 		t.Errorf("database.name = %q, want the default", cfg.Database.Name)
 	}
 }
+
+func TestEnvTrustedProxiesOverride(t *testing.T) {
+	// Compose supplies this, so both the list form and the deliberate
+	// "trust nothing" form have to survive the round trip.
+	t.Setenv("WN_TRUSTED_PROXIES", "10.0.0.0/8, 172.16.0.0/12")
+	cfg := Default()
+	applyEnv(&cfg)
+	if got := cfg.HTTP.TrustedProxies; len(got) != 2 || got[0] != "10.0.0.0/8" || got[1] != "172.16.0.0/12" {
+		t.Fatalf("trusted proxies = %q", got)
+	}
+
+	t.Setenv("WN_TRUSTED_PROXIES", "")
+	cfg = Default()
+	cfg.HTTP.TrustedProxies = []string{"127.0.0.1/32"}
+	applyEnv(&cfg)
+	if len(cfg.HTTP.TrustedProxies) != 0 {
+		t.Fatalf("an empty value should clear the list, got %q", cfg.HTTP.TrustedProxies)
+	}
+}

@@ -1,0 +1,94 @@
+# WhiteNet panel, database and reverse proxy.
+#
+#   cp .env.example .env     # then fill it in, see DEPLOY.md
+#   docker compose up -d
+#
+# Three services and no more: the panel keeps every piece of state in MariaDB,
+# so this is the whole of Main.
+
+name: whitenet
+
+services:
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${WN_DB_NAME:-whitenet}
+      MARIADB_USER: ${WN_DB_USER:-whitenet}
+      MARIADB_PASSWORD: ${WN_DB_PASSWORD:?set WN_DB_PASSWORD in .env}
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+    command:
+      # The schema stores every timestamp in UTC and compares them in SQL, so
+      # the server's own zone has to be UTC or those comparisons shift.
+      - --default-time-zone=+00:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      # The panel migrates on start, so it must not start before the server
+      # answers queries - not merely before the port is open.
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    # Nothing outside the compose network has any business reaching the
+    # database, so no port is published.
+
+  main:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WN_MASTER_KEY: ${WN_MASTER_KEY:?run "docker compose run --rm --no-deps --entrypoint wn-main main genkey" and put the result in .env}
+      WN_DB_HOST: db
+      WN_DB_NAME: ${WN_DB_NAME:-whitenet}
+      WN_DB_USER: ${WN_DB_USER:-whitenet}
+      WN_DB_PASSWORD: ${WN_DB_PASSWORD:?set WN_DB_PASSWORD in .env}
+      WN_PANEL_PATH: ${WN_PANEL_PATH:-/admin}
+      WN_PANEL_DOMAIN: ${WN_PANEL_DOMAIN:?set WN_PANEL_DOMAIN in .env}
+      WN_SUB_DOMAIN: ${WN_SUB_DOMAIN:?set WN_SUB_DOMAIN in .env, or see DEPLOY.md to run on one name}
+      # Caddy's address inside this network is assigned at run time, so the
+      # whole private range is trusted rather than one address. Nothing else
+      # can reach port 8080: it is not published.
+      WN_TRUSTED_PROXIES: ${WN_TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1/32}
+      # What goes into the install command a node is given.
+      WN_GRPC_ADVERTISE: ${WN_GRPC_ADVERTISE:?set WN_GRPC_ADVERTISE in .env, e.g. panel.example.com:8443}
+      WN_LOG_LEVEL: ${WN_LOG_LEVEL:-info}
+      WN_LOG_FORMAT: ${WN_LOG_FORMAT:-json}
+    ports:
+      # The agent endpoint is mutual TLS and must not go through an HTTP
+      # proxy, so it is published directly instead of sitting behind Caddy.
+      - "${WN_GRPC_PORT:-8443}:8443"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - main
+    environment:
+      # Caddy reads these in the Caddyfile. Two different names, so a blocked
+      # subscription host does not take the panel down with it. DEPLOY.md has
+      # the one-name variant.
+      WN_PANEL_DOMAIN: ${WN_PANEL_DOMAIN:?set WN_PANEL_DOMAIN in .env}
+      WN_SUB_DOMAIN: ${WN_SUB_DOMAIN:?set WN_SUB_DOMAIN in .env, or see DEPLOY.md to run on one name}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+volumes:
+  db-data:
+  # The certificates and the ACME account key live here. Losing it means
+  # re-issuing, and the rate limits make that unpleasant, so keep the volume.
+  caddy-data:
+  caddy-config:

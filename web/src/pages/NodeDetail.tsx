@@ -26,6 +26,17 @@ import FluxPanel from "./FluxPanel";
 
 type Tab = "overview" | "inbounds" | "flux" | "metrics" | "logs";
 
+// Spelled out rather than capitalised from the key: "Flux" alone did not tell
+// an operator that this is where OpenFlux is configured, and the DNS tunnel
+// being a protocol under Inbounds is not obvious either.
+const tabLabels: Record<Tab, string> = {
+  overview: "Overview",
+  inbounds: "Inbounds & DNS tunnel",
+  flux: "OpenFlux channels",
+  metrics: "Metrics",
+  logs: "Logs",
+};
+
 export default function NodeDetail(): ReactNode {
   const params = useParams();
   const id = Number(params.id);
@@ -70,7 +81,7 @@ export default function NodeDetail(): ReactNode {
             className={tab === name ? "tab active" : "tab"}
             onClick={() => setTab(name)}
           >
-            {name === "flux" ? "Flux channels" : name[0]!.toUpperCase() + name.slice(1)}
+            {tabLabels[name]}
           </button>
         ))}
       </div>
@@ -396,6 +407,9 @@ function InboundsTab({ node }: { node: Node }): ReactNode {
         ) : inbounds.data.inbounds.length === 0 ? (
           <div className="empty">
             Nothing here. Add an inbound, or apply a template to this node from the Inbounds page.
+            Every protocol lives here, including the WhiteNet DNS tunnel - pick it as the protocol
+            on the add form. OpenFlux is the one exception: it has its own tab, because it has
+            channels rather than a port.
           </div>
         ) : (
           <div className="table-wrap">
