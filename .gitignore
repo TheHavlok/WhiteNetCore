@@ -265,3 +265,22 @@ package-lock.json
 # password. Only the .example.toml files belong in the repository.
 /main.toml
 /agent.toml
+
+# Build output of the panel and agent binaries. They are built from source on
+# every deployment, and a 27 MB binary in a commit is history nobody can drop.
+/wn-main
+/wn-agent
+/whitenet
+
+# The built admin interface, which webui.go embeds with go:embed. Without it
+# the Go build fails outright on a fresh clone, so it has to be in the
+# repository. The blanket `dist` rule further up would hide it; these two
+# lines put it back - the directory first and then its contents, because git
+# will not look inside a directory it has already excluded.
+!internal/panel/webui/dist/
+!internal/panel/webui/dist/**
+
+# The React sources are in the repository, so their manifest has to be too.
+# The blanket package.json rules above are aimed at stray ones at the root.
+!web/package.json
+!web/package-lock.json
