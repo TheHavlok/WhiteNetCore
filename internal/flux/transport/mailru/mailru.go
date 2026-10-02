@@ -43,6 +43,9 @@ type MailruDocsInfo struct {
 	Permissions  map[string]interface{}
 	CallbackURL  string
 	EditorUserID string
+	// CanEdit is the document's "edit" permission as the API reported it.
+	// Without it the coauthoring server treats this peer as a viewer.
+	CanEdit bool
 }
 
 type DocSession struct {
@@ -94,6 +97,12 @@ func NewMailruDocsTransport(weblink string, config transport.TransportConfig) *M
 
 func normalizeWeblink(weblink string) string {
 	weblink = strings.TrimSpace(weblink)
+	// A link copied from the browser's address bar often carries a query or
+	// a fragment ("?weblink=…", "#…"). Sent along as part of "public", it
+	// names a file that does not exist and the API answers 404 forever.
+	if i := strings.IndexAny(weblink, "?#"); i >= 0 {
+		weblink = weblink[:i]
+	}
 	for _, prefix := range []string{
 		"https://cloud.mail.ru/public/",
 		"http://cloud.mail.ru/public/",
@@ -104,7 +113,7 @@ func normalizeWeblink(weblink string) string {
 			return strings.Trim(strings.TrimPrefix(weblink, prefix), "/")
 		}
 	}
-	return weblink
+	return strings.Trim(weblink, "/")
 }
 
 func (t *MailruDocsTransport) Start() error {
@@ -176,12 +185,26 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 			return
 		}
 
+		if !info.CanEdit && utils.Throttled("m-docs.viewonly", 10*time.Minute) {
+			// The coauthoring server relays cursors only between editors, so
+			// a view-only participant connects, authenticates, and then never
+			// receives a byte: the tunnel is "up" and nothing loads.
+			utils.Infof("[M-DOCS] the document is open without edit rights; Mail.ru does not relay " +
+				"data to view-only participants - share it with \"anyone with the link can edit\"")
+		}
+
+		t.jarMu.RLock()
+		jar := t.cookieJar
+		t.jarMu.RUnlock()
 		dialer := websocket.Dialer{
 			HandshakeTimeout: 15 * time.Second,
 			NetDialContext: netbind.Wrap(&net.Dialer{
 				Timeout:   10 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
+			// The editor session's cookies, when there are any (an account's
+			// cookies applied through ApplyCookies, or ones the API set).
+			Jar: jar,
 		}
 		headers := http.Header{}
 		headers.Set("User-Agent", mailruUserAgent)
@@ -195,6 +218,9 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 				status = resp.StatusCode
 			}
 			utils.Debugf("[M-DOCS] WebSocket dial failed (http %d): %v", status, err)
+			if utils.Throttled("m-docs.dial", time.Minute) {
+				utils.Infof("[M-DOCS] cannot reach the document editor (http %d): %v; retrying", status, err)
+			}
 			t.scheduleReconnect(attempt)
 			return
 		}
@@ -277,7 +303,10 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 			if err != nil {
 				utils.Debugf("[M-DOCS] Read error: %v", err)
 				if utils.Throttled("m-docs.drop", time.Minute) {
-					utils.Infof("[M-DOCS] connection to the document dropped: %v; reconnecting", err)
+					// A drop seconds after connecting is the server refusing
+					// the session, not the network: say which.
+					utils.Infof("[M-DOCS] connection to the document dropped after %v: %v; reconnecting",
+						time.Since(connectedAt).Round(time.Second), err)
 				}
 				t.SetConnected(false)
 				conn.Close()
@@ -379,8 +408,22 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 		return
 	}
 
-	if strings.Contains(text, `"type":"auth"`) && strings.Contains(text, `"result":1`) {
-		utils.Debugf("[M-DOCS] Auth OK for user %s", session.UserID)
+	// Anything the server says about the session itself - a refused auth, an
+	// error, a drop, who else is in the document - used to be dropped here
+	// without a word, which left a tunnel that never loads with no clue why.
+	if note := describeServerMessage(text); note.kind != "" {
+		switch note.kind {
+		case "auth-ok":
+			utils.Debugf("[M-DOCS] Auth OK for user %s", session.UserID)
+		case "participants":
+			if utils.Throttled("m-docs.participants", 30*time.Second) {
+				utils.Infof("[M-DOCS] %s", note.detail)
+			}
+		default:
+			if utils.Throttled("m-docs.server."+note.kind, time.Minute) {
+				utils.Infof("[M-DOCS] the document server said %s: %s", note.kind, note.detail)
+			}
+		}
 		return
 	}
 
@@ -397,6 +440,76 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 			t.CallReceive(decoded)
 		}
 	}
+}
+
+// serverNote is what describeServerMessage makes of a control message.
+type serverNote struct {
+	// kind is "" for anything that is not about the session (cursor data,
+	// pings), "auth-ok", "participants", or the name of a failure.
+	kind   string
+	detail string
+}
+
+// describeServerMessage picks out the coauthoring server's messages about the
+// session: Socket.IO refusing the namespace ("44…"), the auth answer, error,
+// drop and warning messages, and the participant list. Cursor traffic and
+// anything unrecognised come back with an empty kind.
+func describeServerMessage(text string) serverNote {
+	// Socket.IO CONNECT_ERROR for the default namespace: the token was not
+	// accepted, before any document message is looked at.
+	if strings.HasPrefix(text, "44") {
+		return serverNote{kind: "connect-error", detail: strings.TrimPrefix(text, "44")}
+	}
+	if !strings.HasPrefix(text, "42") {
+		return serverNote{}
+	}
+	var frame []json.RawMessage
+	if err := json.Unmarshal([]byte(text[2:]), &frame); err != nil || len(frame) < 2 {
+		return serverNote{}
+	}
+	var msg struct {
+		Type         string            `json:"type"`
+		Result       *int              `json:"result"`
+		Code         any               `json:"code"`
+		Description  string            `json:"description"`
+		Participants []json.RawMessage `json:"participants"`
+	}
+	if err := json.Unmarshal(frame[1], &msg); err != nil {
+		return serverNote{}
+	}
+	switch msg.Type {
+	case "auth":
+		if msg.Result != nil && *msg.Result == 1 {
+			return serverNote{kind: "auth-ok"}
+		}
+		return serverNote{kind: "auth-refused", detail: describeCode(msg.Code, msg.Description, msg.Result)}
+	case "error", "drop", "warning":
+		return serverNote{kind: msg.Type, detail: describeCode(msg.Code, msg.Description, nil)}
+	case "connectState":
+		// Two participants means the other side is in the document too; one
+		// means this peer is waiting alone, the usual reason for a session
+		// that never comes up.
+		return serverNote{kind: "participants",
+			detail: fmt.Sprintf("%d participant(s) in the document", len(msg.Participants))}
+	}
+	return serverNote{}
+}
+
+func describeCode(code any, description string, result *int) string {
+	parts := []string{}
+	if description != "" {
+		parts = append(parts, description)
+	}
+	if code != nil {
+		parts = append(parts, fmt.Sprintf("code %v", code))
+	}
+	if result != nil {
+		parts = append(parts, fmt.Sprintf("result %d", *result))
+	}
+	if len(parts) == 0 {
+		return "no details"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // cursorPayloads returns the base64 payload of every cursor entry in a server
@@ -486,11 +599,13 @@ func (t *MailruDocsTransport) fetchDocInfo(weblink string) (MailruDocsInfo, erro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return MailruDocsInfo{}, fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		// The body says why (a missing or private document, an anonymous
+		// editor refused, a rate limit), which the status alone does not.
+		return MailruDocsInfo{}, fmt.Errorf("API returned status %d: %s", resp.StatusCode, snippet(bodyBytes))
+	}
 
 	var res map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &res); err != nil {
@@ -532,7 +647,15 @@ func (t *MailruDocsTransport) fetchDocInfo(weblink string) (MailruDocsInfo, erro
 	wsBase := strings.Replace(apiBase, "https://", "wss://", 1)
 	wsURL := fmt.Sprintf("%s/doc/%s/c/?EIO=4&transport=websocket", wsBase, docKey)
 
+	// Only an explicit "edit": false is taken as view-only: a response that
+	// leaves the key out is not evidence of anything.
+	canEdit := true
+	if edit, ok := permissions["edit"].(bool); ok {
+		canEdit = edit
+	}
+
 	return MailruDocsInfo{
+		CanEdit:      canEdit,
 		Token:        token,
 		DocKey:       docKey,
 		WsURL:        wsURL,
@@ -543,6 +666,18 @@ func (t *MailruDocsTransport) fetchDocInfo(weblink string) (MailruDocsInfo, erro
 		CallbackURL:  callbackURL,
 		EditorUserID: editorUserID,
 	}, nil
+}
+
+// snippet is the start of a response body, for an error message.
+func snippet(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if len(text) > 200 {
+		text = text[:200] + "…"
+	}
+	if text == "" {
+		return "empty body"
+	}
+	return text
 }
 
 func randUserID() string {
@@ -591,16 +726,19 @@ func (t *MailruDocsTransport) ApplyCookies(values map[string]string) error {
 
 	utils.Debugf("[M-DOCS] applied %d cookies, forcing reconnect", len(cookies))
 
+	// Closing the connection is enough: its reader errors out and reconnects
+	// with the new jar, keeping the session's write queue and its one writer.
+	// Clearing the session and scheduling a reconnect here as well started a
+	// second connection beside the reader's, and - because the session was
+	// gone - a second writer on a fresh queue, stranding whatever was queued.
+	// When no connection is up, the connect loop already retrying picks the
+	// new jar up on its next attempt.
 	t.Mu.Lock()
 	session := t.session
-	t.session = nil
 	t.SetConnected(false)
 	t.Mu.Unlock()
 	if session != nil && session.Conn != nil {
 		_ = session.Conn.Close()
-	}
-	if t.IsRunning() {
-		t.scheduleReconnect(0)
 	}
 	return nil
 }
