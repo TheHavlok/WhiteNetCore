@@ -45,14 +45,14 @@ services:
       db:
         condition: service_healthy
     environment:
-      WN_MASTER_KEY: ${WN_MASTER_KEY:?run "docker compose run --rm --no-deps --entrypoint wn-main main genkey" and put the result in .env}
+      WN_MASTER_KEY: ${WN_MASTER_KEY:?generate one with "openssl rand -hex 32" and put it in .env}
       WN_DB_HOST: db
       WN_DB_NAME: ${WN_DB_NAME:-whitenet}
       WN_DB_USER: ${WN_DB_USER:-whitenet}
       WN_DB_PASSWORD: ${WN_DB_PASSWORD:?set WN_DB_PASSWORD in .env}
       WN_PANEL_PATH: ${WN_PANEL_PATH:-/admin}
       WN_PANEL_DOMAIN: ${WN_PANEL_DOMAIN:?set WN_PANEL_DOMAIN in .env}
-      WN_SUB_DOMAIN: ${WN_SUB_DOMAIN:?set WN_SUB_DOMAIN in .env, or see DEPLOY.md to run on one name}
+      WN_SUB_DOMAIN: ${WN_SUB_DOMAIN:-}
       # Caddy's address inside this network is assigned at run time, so the
       # whole private range is trusted rather than one address. Nothing else
       # can reach port 8080: it is not published.
@@ -76,7 +76,7 @@ services:
       # subscription host does not take the panel down with it. DEPLOY.md has
       # the one-name variant.
       WN_PANEL_DOMAIN: ${WN_PANEL_DOMAIN:?set WN_PANEL_DOMAIN in .env}
-      WN_SUB_DOMAIN: ${WN_SUB_DOMAIN:?set WN_SUB_DOMAIN in .env, or see DEPLOY.md to run on one name}
+      WN_SUB_DOMAIN: ${WN_SUB_DOMAIN:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

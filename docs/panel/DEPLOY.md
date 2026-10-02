@@ -33,8 +33,12 @@ cp .env.example .env
 Generate the master key and put it in `.env`:
 
 ```bash
-docker compose run --rm --no-deps --entrypoint wn-main main genkey
+openssl rand -hex 32
 ```
+
+(`wn-main genkey` prints the same kind of key, but `docker compose run` refuses
+to start anything until `WN_MASTER_KEY` is set, so it cannot be used for the
+first one.)
 
 The master key encrypts every secret in the database: Reality private keys,
 Shadowsocks passwords, OpenFlux channel secrets, the node CA key. **Back it
