@@ -22,8 +22,9 @@ var carrierLabels = map[string]struct {
 		Label: "Yandex.Docs",
 		Needs: []string{"url", "cookies_file"},
 		Note: "Traffic rides a Yandex document over a WebSocket. A public document needs no account, " +
-			"but from an address Yandex challenges with SmartCaptcha it will not open without one: " +
-			"put a Netscape cookies.txt for a signed-in account on the node and give its path.",
+			"and the proof-of-work captcha is solved by the carrier itself. SmartCaptcha is not: it has " +
+			"to be passed from this node's own address, so a cookie file exported elsewhere may not be " +
+			"accepted. An exit on an address Yandex does not challenge needs none of this.",
 	},
 	fluxnode.CarrierYandexVolga: {
 		Label: "Yandex Volga",

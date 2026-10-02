@@ -61,7 +61,23 @@ type running struct {
 	// covers everything that affects the running instance.
 	fingerprint string
 	startedAt   time.Time
-	lastErr     string
+
+	// errMu guards lastErr, which a carrier's own goroutine writes when it
+	// cannot authorize.
+	errMu   sync.Mutex
+	lastErr string
+}
+
+func (r *running) setError(text string) {
+	r.errMu.Lock()
+	r.lastErr = text
+	r.errMu.Unlock()
+}
+
+func (r *running) err() string {
+	r.errMu.Lock()
+	defer r.errMu.Unlock()
+	return r.lastErr
 }
 
 // Status is one channel's state, for the heartbeat.
@@ -157,28 +173,29 @@ func (p *Pool) Apply(ctx context.Context, cfg *nodepb.OpenFluxConfig) (started, 
 			stopped = append(stopped, id)
 		}
 
-		instance, startErr := p.startChannel(mode, channel)
+		// The entry exists before the instance does, because a carrier
+		// reports an authorization problem from its own goroutine and has to
+		// have somewhere to write it.
+		entry := &running{id: id, uuid: channel.GetUuid(), fingerprint: want}
+		instance, startErr := p.startChannel(mode, channel, entry)
 		if startErr != nil {
 			errs = append(errs, startErr)
 			// Record the failure so the panel can show which channel is
 			// broken instead of only that something is.
-			p.channels[id] = &running{
-				id: id, uuid: channel.GetUuid(),
-				fingerprint: want, lastErr: startErr.Error(),
-			}
+			entry.setError(startErr.Error())
+			p.channels[id] = entry
 			continue
 		}
-		p.channels[id] = &running{
-			id: id, uuid: channel.GetUuid(), instance: instance,
-			fingerprint: want, startedAt: time.Now(),
-		}
+		entry.instance = instance
+		entry.startedAt = time.Now()
+		p.channels[id] = entry
 		started = append(started, id)
 	}
 	return started, stopped, errors.Join(errs...)
 }
 
 // startChannel builds and starts one exit instance.
-func (p *Pool) startChannel(mode string, channel *nodepb.OpenFluxChannel) (*fluxnode.Instance, error) {
+func (p *Pool) startChannel(mode string, channel *nodepb.OpenFluxChannel, entry *running) (*fluxnode.Instance, error) {
 	carriers, err := carriersFor(channel)
 	if err != nil {
 		return nil, err
@@ -195,6 +212,14 @@ func (p *Pool) startChannel(mode string, channel *nodepb.OpenFluxChannel) (*flux
 	// carrier gets the authenticated handshake rather than the classic path.
 	cfg.Negotiate = cfg.Secret != "" && len(carriers) > 1
 	cfg.Log = p.log.With("channel", channel.GetId())
+	// A carrier that cannot get past a captcha or a login wall retries for
+	// ever and says nothing, so the panel would show an idle channel and no
+	// reason. This is the only way an operator finds out.
+	cfg.OnCarrierIssue = func(transport, url, reason string) {
+		entry.setError(carrierIssueText(transport, reason))
+		p.log.Warn("a carrier cannot authorize",
+			"channel", channel.GetId(), "transport", transport, "reason", reason, "url", url)
+	}
 	if p.opts.CookieDir != "" {
 		cfg.CookieStorePath = filepath.Join(p.opts.CookieDir,
 			fmt.Sprintf("flux-%d.json", channel.GetId()))
@@ -207,6 +232,21 @@ func (p *Pool) startChannel(mode string, channel *nodepb.OpenFluxChannel) (*flux
 	p.log.Info("channel started",
 		"channel", channel.GetId(), "transport", channel.GetTransport(), "mode", mode)
 	return instance, nil
+}
+
+// carrierIssueText words a carrier's authorization problem for the panel.
+// The reason alone ("smartcaptcha") says nothing about what to do about it.
+func carrierIssueText(transport, reason string) string {
+	switch reason {
+	case "smartcaptcha":
+		return transport + ": the service is showing a captcha this carrier cannot solve. " +
+			"It needs the cookies of a signed-in account, or a node the service does not challenge."
+	case "login":
+		return transport + ": the service wants a login. The document or room has to be reachable " +
+			"without one, or the channel needs the cookies of an account that can open it."
+	default:
+		return transport + ": cannot authorize (" + reason + ")"
+	}
 }
 
 // carriersFor turns a channel into flux carriers.
@@ -336,7 +376,7 @@ func (p *Pool) Status() []Status {
 			ChannelID: current.id,
 			UUID:      current.uuid,
 			Since:     current.startedAt,
-			LastError: current.lastErr,
+			LastError: current.err(),
 		}
 		if current.instance != nil {
 			status.SessionActive = current.instance.SessionActive()
@@ -385,7 +425,7 @@ func (p *Pool) RestartChannel(ctx context.Context, id uint64) error {
 		return fmt.Errorf("fluxpool: channel %d is not running here", id)
 	}
 	if current.instance == nil {
-		return fmt.Errorf("fluxpool: channel %d is not running: %s", id, current.lastErr)
+		return fmt.Errorf("fluxpool: channel %d is not running: %s", id, current.err())
 	}
 	// The pool has no copy of the channel's configuration beyond its
 	// fingerprint, so a restart means stopping it and letting the next Apply

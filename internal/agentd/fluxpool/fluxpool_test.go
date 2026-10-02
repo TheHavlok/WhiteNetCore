@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,5 +362,24 @@ func TestActiveSessionsCountsHandshakes(t *testing.T) {
 			t.Fatal("a channel with no client reported an active session")
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func TestCarrierIssueTextSaysWhatToDo(t *testing.T) {
+	// The panel shows this to an operator, and "smartcaptcha" on its own has
+	// never told anyone what to change.
+	got := carrierIssueText("yandex", "smartcaptcha")
+	for _, want := range []string{"yandex", "captcha", "signed-in account"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q does not mention %q", got, want)
+		}
+	}
+	if !strings.Contains(carrierIssueText("mailru", "login"), "login") {
+		t.Fatal("the login case should say so")
+	}
+	// An unknown reason still has to name the carrier and the reason.
+	other := carrierIssueText("boards", "something-new")
+	if !strings.Contains(other, "boards") || !strings.Contains(other, "something-new") {
+		t.Fatalf("unknown reason lost detail: %q", other)
 	}
 }

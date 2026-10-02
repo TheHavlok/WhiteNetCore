@@ -108,6 +108,13 @@ type Config struct {
 	// a restart does not look like a fresh browser to Yandex.
 	CookieStorePath string
 
+	// OnCarrierIssue is called when a carrier cannot authorize - a captcha it
+	// cannot solve, or a login wall. Without it such a carrier is simply
+	// never attached and nothing says why: the exit retries in silence, and
+	// from the outside an unusable channel looks exactly like an idle one.
+	// reason is "smartcaptcha" or "login".
+	OnCarrierIssue func(transport, url, reason string)
+
 	// Client-only: where the local proxy listens.
 	SocksAddr     string
 	HTTPProxyAddr string
@@ -464,6 +471,9 @@ func (inst *Instance) buildCarrier(base transport.TransportConfig) (transport.Tr
 	// Without this the manager never sees the peer's control messages, so
 	// runtime carrier changes, cookie handoff and captcha notifications all
 	// go nowhere.
+	if cfg.OnCarrierIssue != nil {
+		mgr.SetCaptchaNotifier(manager.CaptchaNotifier(cfg.OnCarrierIssue))
+	}
 	session.SetControlHandler(mgr.DispatchControl)
 
 	inst.session = session
