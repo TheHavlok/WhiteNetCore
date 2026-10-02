@@ -96,6 +96,7 @@ type Client struct {
 	tunnelConns          []*net.UDPConn
 	plannerQueue         chan plannerTask
 	encodedTXChannel     chan writerTask
+	downloadPoller       *downloadPoller
 	rxChannel            chan asyncReadPacket
 	tunnelRX_TX_Workers  int
 	tunnelProcessWorkers int
@@ -199,6 +200,9 @@ type encodedOutboundDatagram struct {
 }
 
 type writerTask struct {
+	// isPoll marks an empty query (a PING), whose DNS ids the download
+	// poller has to know to tell its answers apart.
+	isPoll    bool
 	wasPacked bool
 	item      *clientStreamTXPacket
 	selected  *Stream_client
@@ -254,6 +258,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		mtuCryptoOverhead:   mtuCryptoOverhead(cfg.DataEncryptionMethod),
 		maxPackedBlocks:     1,
 		responseMode:        responseMode,
+		downloadPoller:      newDownloadPoller(cfg.DownloadPollWindow),
 		udpBufferPool: sync.Pool{
 			New: func() any {
 				return make([]byte, RuntimeUDPReadBufferSize)
