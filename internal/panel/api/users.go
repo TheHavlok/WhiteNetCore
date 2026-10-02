@@ -452,6 +452,12 @@ func (s *Server) subscriptionLinks(r *http.Request, token string) (map[string]an
 		return nil, err
 	}
 	base := domains.SubBaseURL
+	if base == "" && s.cfg.HTTP.SubDomain != "" {
+		// With a subscription host configured, the panel serves /sub/ on that
+		// host only and answers 404 on its own: a link built from the panel's
+		// address would never load.
+		base = "https://" + s.cfg.HTTP.SubDomain
+	}
 	if base == "" {
 		base = domains.PanelURL
 	}
