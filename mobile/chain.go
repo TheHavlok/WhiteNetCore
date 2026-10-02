@@ -15,18 +15,6 @@ import (
 	"github.com/thehavlok/whitenet/internal/xray"
 )
 
-// encryptionMethod keeps the tunnel's method in range, defaulting to ChaCha20.
-//
-// A profile written before the method travelled in the subscription has a zero
-// here, and zero means "no encryption" to the tunnel - which would be a silent
-// downgrade, not a default.
-func encryptionMethod(method int) int {
-	if method <= 0 || method > 5 {
-		return 2
-	}
-	return method
-}
-
 // StartChained brings up a profile that needs two cores: outerConfig is the
 // tunnel's YAML, innerConfig the Xray configuration that dials out through it.
 //

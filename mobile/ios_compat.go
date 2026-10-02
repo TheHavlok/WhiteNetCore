@@ -60,7 +60,12 @@ type yamlConfig struct {
 		// server's: 0 none, 1 XOR, 2 ChaCha20, 3-5 AES-128/192/256-GCM. The
 		// key length is fixed per method, so a mismatch fails at the
 		// handshake rather than degrading.
-		Method int `yaml:"method"`
+		//
+		// A pointer because "not set" and "method 0" are different things: a
+		// profile written before this field existed must keep whatever the
+		// tunnel library defaults to, and choosing a method for it would
+		// silently stop it talking to its server.
+		Method *int `yaml:"method"`
 	} `yaml:"masterdns"`
 	Socks struct {
 		Host string `yaml:"host"`
@@ -325,10 +330,17 @@ func StartVPN(config string) (*Client, error) {
 			return nil, fmt.Errorf("the DNS profile names no domain to tunnel through")
 		}
 
+		// The method is written only when the profile names one. Writing a
+		// default here would change the method under every profile that
+		// predates the field, and the two ends must agree on it.
+		method := ""
+		if cfg.MasterDns.Method != nil {
+			method = fmt.Sprintf("\n\t\t\t\"DATA_ENCRYPTION_METHOD\": %d,", *cfg.MasterDns.Method)
+		}
+
 		jsonStr := fmt.Sprintf(`{
 			"PROTOCOL_TYPE": "SOCKS5",
-			"DOMAINS": [%s],
-			"DATA_ENCRYPTION_METHOD": %d,
+			"DOMAINS": [%s],%s
 			"ENCRYPTION_KEY": "%s",
 			"LISTEN_IP": "127.0.0.1",
 			"LISTEN_PORT": %d,
@@ -337,7 +349,7 @@ func StartVPN(config string) (*Client, error) {
 			"TUNNEL_PROCESS_WORKERS": 4,
 			"ARQ_WINDOW_SIZE": 1500,
 			"PACKET_DUPLICATION_COUNT": 1
-		}`, strings.Join(domains, ", "), encryptionMethod(cfg.MasterDns.Method), cfg.Crypto.Key, port)
+		}`, strings.Join(domains, ", "), method, cfg.Crypto.Key, port)
 
 		b64 := base64.StdEncoding.EncodeToString([]byte(jsonStr))
 

@@ -314,10 +314,17 @@ func StartVPNAndroid(config string) (*Client, error) {
 			return nil, fmt.Errorf("the DNS profile names no domain to tunnel through")
 		}
 
+		// The method is written only when the profile names one. Writing a
+		// default here would change the method under every profile that
+		// predates the field, and the two ends must agree on it.
+		method := ""
+		if cfg.MasterDns.Method != nil {
+			method = fmt.Sprintf("\n\t\t\t\"DATA_ENCRYPTION_METHOD\": %d,", *cfg.MasterDns.Method)
+		}
+
 		jsonStr := fmt.Sprintf(`{
 			"PROTOCOL_TYPE": "SOCKS5",
-			"DOMAINS": [%s],
-			"DATA_ENCRYPTION_METHOD": %d,
+			"DOMAINS": [%s],%s
 			"ENCRYPTION_KEY": "%s",
 			"LISTEN_IP": "127.0.0.1",
 			"LISTEN_PORT": %d,
@@ -326,7 +333,7 @@ func StartVPNAndroid(config string) (*Client, error) {
 			"TUNNEL_PROCESS_WORKERS": 4,
 			"ARQ_WINDOW_SIZE": 1500,
 			"PACKET_DUPLICATION_COUNT": 1
-		}`, strings.Join(domains, ", "), encryptionMethod(cfg.MasterDns.Method), cfg.Crypto.Key, port)
+		}`, strings.Join(domains, ", "), method, cfg.Crypto.Key, port)
 
 		b64 := base64.StdEncoding.EncodeToString([]byte(jsonStr))
 
