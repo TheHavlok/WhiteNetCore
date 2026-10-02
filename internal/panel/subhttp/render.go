@@ -224,6 +224,12 @@ func (s *Server) serverFromInbound(
 		server.Params["domains"] = inbound.Params.Get("domains")
 		server.Params["encryption_method"] = orDefault(inbound.Params.Get("encryption_method"), "2")
 		server.Params["encryption_key"] = secrets["encryption_key"]
+		// Where the app sends the tunnel's queries. Optional: the app has a
+		// built-in list, and this is how an operator replaces it when the
+		// resolvers that get through change, without an app release.
+		if resolvers := inbound.Params.Get("resolvers"); resolvers != "" {
+			server.Params["resolvers"] = resolvers
+		}
 
 		// The tunnel has no accounts of its own: it forwards into an Xray
 		// inbound, and that inbound is what authenticates the user. The app

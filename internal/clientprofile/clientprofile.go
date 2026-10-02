@@ -480,6 +480,15 @@ func dnsProfile(server subscription.Server, opt Options) (*Profile, error) {
 		// section came last and be silently ignored.
 		method = fmt.Sprintf("  method: %s\n", value)
 	}
+	// The resolvers, when the panel names them, go in the same block; with
+	// none the app uses its built-in list.
+	if resolvers := splitList(p["resolvers"]); len(resolvers) > 0 {
+		quotedResolvers := make([]string, 0, len(resolvers))
+		for _, resolver := range resolvers {
+			quotedResolvers = append(quotedResolvers, strconv.Quote(fmt.Sprint(resolver)))
+		}
+		method += fmt.Sprintf("  resolvers: [%s]\n", strings.Join(quotedResolvers, ", "))
+	}
 
 	// Where the tunnel offers its SOCKS proxy. With no chain the device dials
 	// it directly, which is the classic standalone DNS tunnel: the shared key

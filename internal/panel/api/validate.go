@@ -12,6 +12,7 @@ import (
 	"github.com/thehavlok/whitenet/internal/panel/keygen"
 	"github.com/thehavlok/whitenet/internal/panel/secret"
 	"github.com/thehavlok/whitenet/internal/panel/store"
+	mdnsconfig "github.com/thehavlok/whitenet/masterdnsvpn/config"
 )
 
 // secretBox is an alias so the helpers read as being about secrets rather
@@ -106,6 +107,11 @@ func validateInbound(protocol, network, security string, params store.JSONMap, s
 		for _, domain := range domains {
 			if err := validateDomain(domain); err != nil {
 				return err
+			}
+		}
+		for _, resolver := range splitCSV(params["resolvers"]) {
+			if parsed, _ := mdnsconfig.ParseResolverList([]string{resolver}); len(parsed) == 0 {
+				return fmt.Errorf("%q is not a resolver: use an address, address:port or [v6]:port", resolver)
 			}
 		}
 		method, err := strconv.Atoi(orDefault(params["encryption_method"], "2"))

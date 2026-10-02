@@ -580,6 +580,7 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 			}
 
 			encodedTask := writerTask{
+				isPoll:    task.opts.PacketType == Enums.PACKET_PING,
 				wasPacked: task.wasPacked,
 				item:      task.item,
 				selected:  task.selected,
@@ -800,6 +801,9 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 					)
 				}
 			}
+			if task.isPoll {
+				c.downloadPoller.noteSent(task.frames, now)
+			}
 			if !task.wasPacked && task.selected != nil {
 				task.selected.ReleaseTXPacket(task.item)
 			}
@@ -878,6 +882,9 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr string) {
 	// c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
 
+	// Whatever the answer holds, it settles the query it answers.
+	c.downloadPoller.noteAnswer(data)
+
 	// 1. Extract VPN Packet from DNS Response
 	vpnPacket, err := DnsParser.ExtractVPNResponse(data, c.responseMode == mtuProbeBase64Reply)
 	if err != nil {
@@ -934,6 +941,12 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 	// 4. Dispatch to Packet Handlers via Registry
 	if err := handlers.Dispatch(c, vpnPacket, addr); err != nil {
 		c.log.Debugf("\U0001F6A8 <red>Handler execution failed: %v</red>", err)
+	}
+
+	// 5. Data came down, so the server likely has more queued behind it:
+	// keep enough queries in flight for it to answer with.
+	if carriesDownstreamData(vpnPacket.PacketType) {
+		c.topUpDownloadPolls()
 	}
 
 }

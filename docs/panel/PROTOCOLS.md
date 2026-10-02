@@ -140,13 +140,28 @@ To set it up:
    length - 16 bytes for AES-128, 24 for AES-192, 32 for ChaCha20 and
    AES-256 - and the tunnel refuses a key of any other length rather than
    padding it.
+5. **Resolvers** (optional): where the app sends the tunnel's queries -
+   `address`, `address:port` or `[v6]:port`, comma separated. Left empty, the
+   app uses its built-in list (Yandex DNS, the NSDI resolvers `195.208.4.1`
+   and `195.208.5.1`, and MSK-IX `62.76.76.62`, `62.76.62.76`). Which
+   resolvers get through differs by operator and region, most of all under
+   mobile whitelists, so this is how a list that stopped working is replaced
+   without an app release: the next subscription update brings the new one.
+   Whatever the list, the app's start-up MTU test drops resolvers that do not
+   reach the node.
 
-The client gets `domains`, `encryption_method` and `encryption_key`, plus
-`chain` with the inner protocol's credentials. It brings the tunnel up, then
-speaks the chained protocol through it. Both halves are in one `whitenet://`
-link.
+The client gets `domains`, `encryption_method`, `encryption_key` and, when set,
+`resolvers`, plus `chain` with the inner protocol's credentials. It brings the
+tunnel up, then speaks the chained protocol through it. Both halves are in one
+`whitenet://` link.
 
-Expect a few hundred kbit/s. It is an escape hatch, not a daily driver.
+Speed is set by how many queries are in flight, because the server can only
+answer: the app keeps up to 32 empty poll queries outstanding while data is
+flowing (`DOWNLOAD_POLL_WINDOW`). On the loopback bench
+(`masterdnsvpn/benchtest`, 200 ms resolver round trip, 1 % loss) that took a
+1 MiB download from about 1.2 to 3.7 Mbit/s. Real resolvers add their own
+rate limits, so expect less in the field. It is still an escape hatch, not a
+daily driver.
 
 ## Flux
 

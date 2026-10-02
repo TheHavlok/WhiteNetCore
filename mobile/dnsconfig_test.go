@@ -2,14 +2,13 @@ package mobile
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
-// dnsConfigJSON reproduces what StartVPN builds for the tunnel, so the shape
-// can be checked without starting anything.
+// dnsConfigJSON is what StartVPN hands the tunnel for a profile, parsed so
+// the shape can be checked without starting anything.
 //
 // This exists because of a regression: the method was written unconditionally
 // with a default of its own, which silently changed it under every profile
@@ -21,41 +20,15 @@ func dnsConfigJSON(t *testing.T, profile string) map[string]any {
 	if err := yaml.Unmarshal([]byte(profile), &cfg); err != nil {
 		t.Fatalf("parse profile: %v", err)
 	}
-
-	domains := make([]string, 0, len(cfg.MasterDns.Domains))
-	for _, domain := range cfg.MasterDns.Domains {
-		if domain = strings.TrimSpace(domain); domain != "" {
-			domains = append(domains, `"`+domain+`"`)
-		}
+	raw, err := dnsClientJSON(cfg, 10808)
+	if err != nil {
+		t.Fatalf("build the tunnel config: %v", err)
 	}
-	method := ""
-	if cfg.MasterDns.Method != nil {
-		method = jsonMethodLine(*cfg.MasterDns.Method)
-	}
-
-	raw := `{"PROTOCOL_TYPE":"SOCKS5","DOMAINS":[` + strings.Join(domains, ",") + `]` + method +
-		`,"ENCRYPTION_KEY":"` + cfg.Crypto.Key + `"}`
 	var out map[string]any
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		t.Fatalf("the built config is not valid JSON: %v\n%s", err, raw)
 	}
 	return out
-}
-
-func jsonMethodLine(method int) string {
-	return `,"DATA_ENCRYPTION_METHOD":` + itoa(method)
-}
-
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	digits := ""
-	for v > 0 {
-		digits = string(rune('0'+v%10)) + digits
-		v /= 10
-	}
-	return digits
 }
 
 func TestLegacyDNSProfileKeepsTheLibraryDefaultMethod(t *testing.T) {
@@ -120,5 +93,53 @@ masterdns:
 	config := dnsConfigJSON(t, profile)
 	if config["DATA_ENCRYPTION_METHOD"] != float64(0) {
 		t.Fatalf("method = %v, want 0", config["DATA_ENCRYPTION_METHOD"])
+	}
+}
+
+// The tunnel polls for downstream data; without it, download speed is
+// whatever the start of a transfer happens to leave in flight.
+func TestDNSProfilePollsForDownloads(t *testing.T) {
+	config := dnsConfigJSON(t, `
+masterdns:
+  domains: ["t.example"]
+crypto:
+  key: "k"
+`)
+	if config["DOWNLOAD_POLL_WINDOW"] != float64(dnsDownloadPollWindow) {
+		t.Fatalf("poll window = %v, want %d", config["DOWNLOAD_POLL_WINDOW"], dnsDownloadPollWindow)
+	}
+}
+
+// A profile's own resolvers replace the built-in list; one that names none,
+// or none that parse, gets the built-in list.
+func TestDNSResolversFromProfile(t *testing.T) {
+	var cfg yamlConfig
+	if err := yaml.Unmarshal([]byte(`
+masterdns:
+  domains: ["t.example"]
+  resolvers: ["10.0.0.53", "10.0.0.54:5353", "garbage"]
+`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	resolvers, ports := dnsResolvers(cfg)
+	if len(resolvers) != 2 || resolvers[0].IP != "10.0.0.53" || resolvers[1].Port != 5353 {
+		t.Fatalf("resolvers = %v", resolvers)
+	}
+	if ports["10.0.0.53"] != 53 {
+		t.Fatalf("the resolver map holds ports, got %v", ports)
+	}
+
+	for _, profile := range []string{
+		"masterdns:\n  domains: [\"t.example\"]\n",
+		"masterdns:\n  domains: [\"t.example\"]\n  resolvers: [\"nope\"]\n",
+	} {
+		var plain yamlConfig
+		if err := yaml.Unmarshal([]byte(profile), &plain); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := dnsResolvers(plain)
+		if len(got) != len(defaultDNSResolvers) {
+			t.Fatalf("%q: %d resolvers, want the %d built in", profile, len(got), len(defaultDNSResolvers))
+		}
 	}
 }

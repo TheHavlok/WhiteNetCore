@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xtls/xray-core/infra/conf/serial"
+	"gopkg.in/yaml.v3"
 
 	"github.com/thehavlok/whitenet/internal/panel/subscription"
 )
@@ -329,5 +330,48 @@ func TestUnknownProtocolIsRefusedNotGuessed(t *testing.T) {
 	}, Options{})
 	if err == nil {
 		t.Fatal("an unknown protocol must be refused so the app can skip it")
+	}
+}
+
+// Resolvers the panel names land inside the masterdns block, where the app
+// reads them; a server without them leaves the app on its built-in list.
+func TestDNSTunnelCarriesResolvers(t *testing.T) {
+	server := subscription.Server{
+		ID: "n:dns", Name: "dns", Protocol: "wndns", Transport: "dns",
+		Params: map[string]string{
+			"domains": "t.example", "encryption_key": "4f3c2b1a09876543210fedcba9876543",
+			"encryption_method": "2",
+			"resolvers":         "195.208.4.1, 62.76.76.62:53",
+		},
+	}
+	profile, err := FromServer(server, Options{SocksPort: 10808})
+	if err != nil {
+		t.Fatalf("FromServer: %v", err)
+	}
+	var parsed struct {
+		MasterDns struct {
+			Domains   []string `yaml:"domains"`
+			Method    int      `yaml:"method"`
+			Resolvers []string `yaml:"resolvers"`
+		} `yaml:"masterdns"`
+	}
+	if err := yaml.Unmarshal([]byte(profile.Config), &parsed); err != nil {
+		t.Fatalf("the profile is not YAML: %v\n%s", err, profile.Config)
+	}
+	got := parsed.MasterDns.Resolvers
+	if len(got) != 2 || got[0] != "195.208.4.1" || got[1] != "62.76.76.62:53" {
+		t.Fatalf("resolvers = %v\n%s", got, profile.Config)
+	}
+	if parsed.MasterDns.Method != 2 || len(parsed.MasterDns.Domains) != 1 {
+		t.Fatalf("the resolvers displaced the rest of the block:\n%s", profile.Config)
+	}
+
+	delete(server.Params, "resolvers")
+	profile, err = FromServer(server, Options{SocksPort: 10808})
+	if err != nil {
+		t.Fatalf("FromServer: %v", err)
+	}
+	if strings.Contains(profile.Config, "resolvers:") {
+		t.Fatalf("a server without resolvers must not name any:\n%s", profile.Config)
 	}
 }

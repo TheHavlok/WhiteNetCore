@@ -668,6 +668,16 @@ function WNDNSFields({
           placeholder="t1.tunnel.example.com,t2.tunnel.example.com"
         />
       </Field>
+      <Field
+        label="Resolvers"
+        help="Optional, comma separated: address, address:port or [v6]:port. Where the app sends the tunnel's queries. Empty keeps the app's built-in list; set it when the resolvers that get through change, and every app picks it up on its next subscription update."
+      >
+        <input
+          value={params.resolvers ?? ""}
+          onChange={(event) => setParam("resolvers", event.target.value)}
+          placeholder="195.208.4.1,195.208.5.1,77.88.8.8"
+        />
+      </Field>
       <div className="grid cols-2">
         <Field label="Encryption">
           <select
