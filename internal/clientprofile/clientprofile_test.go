@@ -50,19 +50,19 @@ func TestEveryXrayProtocolBuilds(t *testing.T) {
 			ID: "n:vmess", Name: "VMess ws", Protocol: "vmess", Transport: "ws",
 			Address: "198.51.100.11", Port: 8080,
 			Params: map[string]string{
-				"uuid": "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0",
+				"uuid":     "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0",
 				"security": "auto", "path": "/v", "host": "example.com",
 			},
 		},
 		{
 			ID: "n:trojan", Name: "Trojan", Protocol: "trojan", Transport: "tls",
 			Address: "198.51.100.12", Port: 443,
-			Params:  map[string]string{"password": "s3cr3t", "sni": "example.com"},
+			Params: map[string]string{"password": "s3cr3t", "sni": "example.com"},
 		},
 		{
 			ID: "n:ss", Name: "Shadowsocks", Protocol: "shadowsocks", Transport: "raw",
 			Address: "198.51.100.13", Port: 8388,
-			Params:  map[string]string{"method": "aes-256-gcm", "password": "pw"},
+			Params: map[string]string{"method": "aes-256-gcm", "password": "pw"},
 		},
 		{
 			ID: "n:ss2022", Name: "Shadowsocks 2022", Protocol: "shadowsocks2022", Transport: "raw",
@@ -85,7 +85,7 @@ func TestEveryXrayProtocolBuilds(t *testing.T) {
 			ID: "n:grpc", Name: "VLESS grpc", Protocol: "vless", Transport: "grpc",
 			Address: "198.51.100.16", Port: 443,
 			Params: map[string]string{
-				"uuid": "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0",
+				"uuid":         "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0",
 				"service_name": "wn", "multi_mode": "true", "sni": "example.com",
 			},
 		},
@@ -120,7 +120,7 @@ func TestSocksPortIsTheOneAsked(t *testing.T) {
 	server := subscription.Server{
 		ID: "n:v", Name: "v", Protocol: "vless", Transport: "raw",
 		Address: "198.51.100.1", Port: 443,
-		Params:  map[string]string{"uuid": "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"},
+		Params: map[string]string{"uuid": "9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"},
 	}
 	profile, err := FromServer(server, Options{SocksPort: 12345})
 	if err != nil {
@@ -194,20 +194,36 @@ func TestDNSTunnelChainsThroughItsOwnProxy(t *testing.T) {
 	buildable(t, profile.Inner.Config)
 }
 
-func TestDNSTunnelWithoutAChainIsRefused(t *testing.T) {
-	// Without an inner protocol the tunnel's shared key is the only
-	// credential, which is the thing the chain exists to fix. Refusing here
-	// is better than building a profile that lets anyone in.
-	_, err := FromServer(subscription.Server{
+func TestDNSTunnelWithoutAChainIsStandalone(t *testing.T) {
+	// The classic DNS VPN: no inner hop, the shared key is the whole
+	// authentication, and the device's traffic goes straight through the
+	// tunnel. This is what worked before chaining existed, so it must keep
+	// working - a node with no chain target still produces a usable profile.
+	profile, err := FromServer(subscription.Server{
 		ID: "n:dns", Name: "dns", Protocol: "wndns", Transport: "dns",
 		Address: "198.51.100.2", Port: 53,
-		Params: map[string]string{"domains": "t.example", "encryption_key": "k"},
-	}, Options{})
-	if err == nil {
-		t.Fatal("a DNS server with no chain should be refused")
+		Params: map[string]string{
+			"domains": "t.example", "encryption_key": "4f3c2b1a09876543210fedcba9876543",
+			"encryption_method": "2",
+		},
+	}, Options{SocksPort: 10808})
+	if err != nil {
+		t.Fatalf("a standalone DNS server must build: %v", err)
 	}
-	if !strings.Contains(err.Error(), "chain") {
-		t.Fatalf("the error does not say what is wrong: %v", err)
+	if profile.Chained() {
+		t.Fatal("a DNS server with no chain must not need two cores")
+	}
+	if profile.Kind != KindWhiteNet {
+		t.Fatalf("kind = %q", profile.Kind)
+	}
+	// Standalone, the tunnel serves the device directly on the main port.
+	if !strings.Contains(profile.Config, "port: 10808") {
+		t.Fatalf("the tunnel does not serve the device directly:\n%s", profile.Config)
+	}
+	for _, want := range []string{"provider: dns", "t.example", "method: 2"} {
+		if !strings.Contains(profile.Config, want) {
+			t.Fatalf("missing %q in:\n%s", want, profile.Config)
+		}
 	}
 }
 
@@ -232,19 +248,53 @@ func TestFluxPrefersTheHighestPriorityCarrier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromServer: %v", err)
 	}
-	if profile.Kind != KindWhiteNet {
-		t.Fatalf("kind = %q", profile.Kind)
+	if profile.Kind != KindFlux {
+		t.Fatalf("kind = %q, want flux", profile.Kind)
 	}
-	// Priority 100 beats 50, so the direct carrier wins however the list is
-	// ordered - the subscription does not promise an order.
-	if !strings.Contains(profile.Config, "provider: direct") {
-		t.Fatalf("the higher priority carrier was not chosen:\n%s", profile.Config)
+
+	// The flux client takes JSON carrying every carrier, so it can fail over
+	// without the app reconnecting; it is the client that picks by priority.
+	var doc struct {
+		Version   int    `json:"whitenet_flux"`
+		Mode      string `json:"mode"`
+		Secret    string `json:"secret"`
+		SocksPort int    `json:"socks_port"`
+		Carriers  []struct {
+			Type     string            `json:"type"`
+			Priority int               `json:"priority"`
+			Params   map[string]string `json:"params"`
+		} `json:"carriers"`
 	}
-	if !strings.Contains(profile.Config, "198.51.100.3:8444") {
-		t.Fatalf("the carrier's dial address is missing:\n%s", profile.Config)
+	if err := json.Unmarshal([]byte(profile.Config), &doc); err != nil {
+		t.Fatalf("flux profile is not valid JSON: %v\n%s", err, profile.Config)
 	}
-	if !strings.Contains(profile.Config, "port: 8808") {
-		t.Fatalf("the config does not listen where it was told:\n%s", profile.Config)
+	if doc.Version == 0 {
+		t.Fatalf("the flux marker is missing, so the client would not recognise it:\n%s", profile.Config)
+	}
+	if doc.SocksPort != 8808 {
+		t.Fatalf("socks port = %d, want 8808", doc.SocksPort)
+	}
+	if doc.Secret == "" {
+		t.Fatal("the channel secret did not travel; the session cannot authenticate")
+	}
+	if len(doc.Carriers) != 2 {
+		t.Fatalf("both carriers must travel for failover, got %d", len(doc.Carriers))
+	}
+	var direct struct {
+		Priority int
+		Dial     string
+	}
+	for _, c := range doc.Carriers {
+		if c.Type == "direct" {
+			direct.Priority = c.Priority
+			direct.Dial = c.Params["dial"]
+		}
+	}
+	if direct.Priority != 100 {
+		t.Fatalf("the direct carrier's priority was lost: %d", direct.Priority)
+	}
+	if direct.Dial != "198.51.100.3:8444" {
+		t.Fatalf("the carrier's dial address is missing: %q", direct.Dial)
 	}
 }
 

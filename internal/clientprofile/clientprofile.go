@@ -28,8 +28,11 @@ type Kind string
 const (
 	// KindXray is an Xray JSON configuration.
 	KindXray Kind = "xray"
-	// KindWhiteNet is a WhiteNet YAML profile: the DNS tunnel, or flux.
+	// KindWhiteNet is a WhiteNet YAML profile: the DNS tunnel.
 	KindWhiteNet Kind = "whitenet"
+	// KindFlux is a flux profile: its own JSON shape, started by the flux
+	// client rather than either of the two cores above.
+	KindFlux Kind = "flux"
 )
 
 // Default local ports.
@@ -463,11 +466,6 @@ func dnsProfile(server subscription.Server, opt Options) (*Profile, error) {
 	if p["encryption_key"] == "" {
 		return nil, missing(server, "encryption_key")
 	}
-	if server.Chain == nil {
-		return nil, fmt.Errorf("clientprofile: DNS server %q has no chain: "+
-			"the tunnel has no accounts of its own, so without an inner protocol there is nothing to authenticate with",
-			server.Name)
-	}
 
 	domains := splitList(p["domains"])
 	quoted := make([]string, 0, len(domains))
@@ -481,6 +479,15 @@ func dnsProfile(server subscription.Server, opt Options) (*Profile, error) {
 		// indentation-scoped, so a trailing line would land under whatever
 		// section came last and be silently ignored.
 		method = fmt.Sprintf("  method: %s\n", value)
+	}
+
+	// Where the tunnel offers its SOCKS proxy. With no chain the device dials
+	// it directly, which is the classic standalone DNS tunnel: the shared key
+	// is the authentication, exactly as it has always worked. With a chain
+	// the tunnel feeds the inner hop instead, on a separate port.
+	tunnelPort := opt.SocksPort
+	if server.Chain != nil {
+		tunnelPort = opt.ChainSocksPort
 	}
 
 	outer := fmt.Sprintf(`mode: cnc
@@ -499,8 +506,21 @@ socks:
 		strconv.Quote(p["encryption_key"]),
 		strings.Join(quoted, ", "),
 		method,
-		opt.ChainSocksPort,
+		tunnelPort,
 	)
+
+	// A standalone tunnel has no inner hop: it is the whole VPN, and the
+	// device's traffic goes straight through it. This is the DNS VPN that
+	// worked before chaining existed, so a node without a chain target keeps
+	// behaving exactly as it did.
+	if server.Chain == nil {
+		return &Profile{
+			ID:     server.ID,
+			Name:   server.Name,
+			Kind:   KindWhiteNet,
+			Config: outer,
+		}, nil
+	}
 
 	// The inner hop has no address of its own: it is reached through the
 	// tunnel, which forwards to whatever the node chained it to. Loopback is
@@ -568,35 +588,47 @@ func fluxProfile(server subscription.Server, opt Options) (*Profile, error) {
 		}
 	}
 
-	room := firstNonEmpty(carrier.URL, channel.Context, channel.ID)
-	config := fmt.Sprintf(`mode: cnc
-auth:
-  provider: %s
-room:
-  id: %s
-crypto:
-  key: %s
-net:
-  transport: %s
-socks:
-  host: "127.0.0.1"
-  port: %d
-`,
-		carrier.Type,
-		strconv.Quote(room),
-		strconv.Quote(channel.Secret),
-		orDefault(carrier.Params["transport"], "data"),
-		opt.SocksPort,
-	)
-	if dial := carrier.Params["dial"]; dial != "" {
-		config += fmt.Sprintf("  dial: %s\n", strconv.Quote(dial))
+	_ = carrier // every carrier travels; the client picks by priority.
+
+	// The flux client takes its own JSON shape, carrying all the carriers so
+	// a blocked one fails over to the next rather than the app having to
+	// reconnect. The "whitenet_flux" marker is what tells it apart from an
+	// Xray configuration, which is also JSON.
+	doc := map[string]any{
+		"whitenet_flux": 1,
+		"mode":          orDefault(server.Flux.Mode, "l4"),
+		"secret":        channel.Secret,
+		"socks_port":    opt.SocksPort,
+	}
+	if channel.Context != "" {
+		doc["context"] = channel.Context
+	}
+	carriers := make([]map[string]any, 0, len(channel.Carriers))
+	for _, c := range channel.Carriers {
+		entry := map[string]any{"type": c.Type}
+		if c.URL != "" {
+			entry["url"] = c.URL
+		}
+		if c.Priority != 0 {
+			entry["priority"] = c.Priority
+		}
+		if len(c.Params) > 0 {
+			entry["params"] = c.Params
+		}
+		carriers = append(carriers, entry)
+	}
+	doc["carriers"] = carriers
+
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("clientprofile: marshal flux: %w", err)
 	}
 
 	return &Profile{
 		ID:     server.ID,
 		Name:   server.Name,
-		Kind:   KindWhiteNet,
-		Config: config,
+		Kind:   KindFlux,
+		Config: string(raw),
 	}, nil
 }
 
