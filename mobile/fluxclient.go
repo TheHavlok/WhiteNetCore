@@ -84,7 +84,13 @@ var (
 
 // startFluxClient brings up a flux profile and hands back the usual Client, so
 // the platform layers cannot tell which core is running.
-func startFluxClient(config string, pointPacketStackAt func(int) *Client) (*Client, error) {
+//
+// initPacketStack brings up the platform's tun2socks stack (initTUN on iOS,
+// initTUNAndroid on Android). It is not optional: without it the flux SOCKS
+// listener is up and the session connects, but nothing reads the device's
+// packets from the OS tunnel, so the session carries no traffic - connected
+// but nothing loads. The Xray path has always called it; flux has to as well.
+func startFluxClient(config string, initPacketStack func(), pointPacketStackAt func(int) *Client) (*Client, error) {
 	var profile FluxProfile
 	if err := json.Unmarshal([]byte(config), &profile); err != nil {
 		return nil, fmt.Errorf("flux profile: %w", err)
@@ -121,6 +127,13 @@ func startFluxClient(config string, pointPacketStackAt func(int) *Client) (*Clie
 			Priority: carrier.Priority,
 			Params:   carrier.Params,
 		})
+	}
+
+	// The packet stack comes up before the client, so the device's traffic
+	// has somewhere to go the moment the session is ready. It is a sync.Once
+	// inside, so a second profile does not rebuild it.
+	if initPacketStack != nil {
+		initPacketStack()
 	}
 
 	instance, err := fluxnode.Start(cfg)

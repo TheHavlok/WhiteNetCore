@@ -256,7 +256,7 @@ func StartVPN(config string) (*Client, error) {
 	// его профиль — тоже JSON, и без этого ушёл бы в ядро Xray.
 	if IsFluxConfig(config) {
 		applyIOSMemoryLimits()
-		return startFluxClient(config, func(port int) *Client {
+		return startFluxClient(config, initTUN, func(port int) *Client {
 			activeClient = &Client{socksPort: port}
 			return activeClient
 		})

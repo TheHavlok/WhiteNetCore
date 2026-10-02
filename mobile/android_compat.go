@@ -233,7 +233,7 @@ func (h *tunHandlerAndroid) HandleUDP(conn adapter.UDPConn) {
 func StartVPNAndroid(config string) (*Client, error) {
 	// flux проверяется первым: его профиль — JSON, как и у Xray.
 	if IsFluxConfig(config) {
-		return startFluxClient(config, func(port int) *Client {
+		return startFluxClient(config, initTUNAndroid, func(port int) *Client {
 			activeClientAndroid = &Client{socksPort: port}
 			return activeClientAndroid
 		})
