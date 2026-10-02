@@ -88,6 +88,33 @@ func (s *Server) handleSetNodeFlux(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, response)
 }
 
+// handleChannelShareLink returns a self-contained whitenet:// link for a flux
+// channel. Unlike a subscription, the link carries the channel's credentials,
+// so whoever is given it connects straight to that channel - the "share a
+// config with someone" case.
+func (s *Server) handleChannelShareLink(w http.ResponseWriter, r *http.Request) {
+	channelID, ok := s.pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	if s.sub == nil {
+		s.writeError(w, http.StatusNotImplemented, codeInternal,
+			"this panel was built without the subscription renderer")
+		return
+	}
+	link, err := s.sub.ChannelShareLink(r, channelID)
+	if err != nil {
+		s.writeStoreError(w, err, "the channel")
+		return
+	}
+
+	channel, err := s.store.ChannelByID(r.Context(), channelID)
+	if err == nil {
+		s.audit(r, "channel.share", "channel", channel.UUID, nil)
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"link": link})
+}
+
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	nodeID, ok := s.pathID(w, r, "id")
 	if !ok {

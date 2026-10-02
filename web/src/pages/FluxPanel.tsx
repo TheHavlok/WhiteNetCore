@@ -3,17 +3,7 @@ import type { ReactNode } from "react";
 
 import { api, RequestError } from "../api";
 import type { Channel, Node } from "../types";
-import {
-  Banner,
-  Card,
-  Confirm,
-  Field,
-  Modal,
-  Pill,
-  Spinner,
-  formatDate,
-  useAsync,
-} from "../components/ui";
+import { Banner, Card, Confirm, CopyLine, Field, Modal, Pill, Spinner, formatDate, useAsync } from "../components/ui";
 
 /**
  * FluxPanel configures a node's flux exit and its channel pool.
@@ -29,6 +19,7 @@ export default function FluxPanel({ node }: { node: Node }): ReactNode {
   const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState<Channel | null>(null);
   const [rotating, setRotating] = useState<Channel | null>(null);
+  const [shareLink, setShareLink] = useState<{ name: string; link: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -170,6 +161,26 @@ export default function FluxPanel({ node }: { node: Node }): ReactNode {
                       <button className="small" onClick={() => setRotating(channel)}>
                         Rotate key
                       </button>{" "}
+                      {channel.shareable && channel.enabled && (
+                        <>
+                          <button
+                            className="small"
+                            title="A self-contained whitenet:// link to this channel, to hand to someone"
+                            onClick={() =>
+                              api
+                                .channelShareLink(channel.id)
+                                .then((r) => setShareLink({ name: channel.name, link: r.link }))
+                                .catch((caught: unknown) =>
+                                  setError(
+                                    caught instanceof RequestError ? caught.message : String(caught),
+                                  ),
+                                )
+                            }
+                          >
+                            Share link
+                          </button>{" "}
+                        </>
+                      )}
                       <button className="small danger" onClick={() => setDeleting(channel)}>
                         Delete
                       </button>
@@ -192,6 +203,17 @@ export default function FluxPanel({ node }: { node: Node }): ReactNode {
             channels.reload();
           }}
         />
+      )}
+
+      {shareLink && (
+        <Modal title={`Share “${shareLink.name}”`} onClose={() => setShareLink(null)}>
+          <p className="muted" style={{ marginTop: 0 }}>
+            A self-contained link to this channel. Whoever opens it in WhiteNetVPN connects straight
+            to this exit — no subscription needed. A flux channel carries one client at a time, so
+            treat it as dedicated to whoever you give it to.
+          </p>
+          <CopyLine value={shareLink.link} />
+        </Modal>
       )}
 
       {rotating && (

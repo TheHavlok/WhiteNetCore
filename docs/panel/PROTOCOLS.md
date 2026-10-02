@@ -203,6 +203,19 @@ Several carriers in one channel is failover: the client tries them by priority
 and moves on when one is blocked. Mixing a cover carrier with `direct` gives
 you "use the quiet path, fall back to the fast one".
 
+### Sharing one channel
+
+A subscription is tied to a user and leases a channel from the pool. To hand a
+working config to **someone without an account**, use **Share link** on a
+channel (OpenFlux channels tab): it produces a self-contained `whitenet://`
+link with that channel's secret and carriers embedded, so whoever opens it in
+WhiteNetVPN connects straight to this exit - no subscription, no lease.
+
+A flux channel carries one client at a time, so a shared link is effectively
+dedicated to whoever holds it: two people with the same link are one client.
+Give each person their own channel. Rotating the channel's key invalidates
+every link to it.
+
 ### The l3 firewall rule
 
 `l3` sends traffic from the host's own address with SNAT, so the kernel sees

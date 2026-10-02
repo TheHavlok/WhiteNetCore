@@ -49,6 +49,9 @@ const (
 // does not depend on the subscription server, and so tests can leave it out.
 type SubscriptionRenderer interface {
 	Render(r *http.Request, user *store.User) (*subscription.Response, error)
+	// ChannelShareLink builds a self-contained whitenet:// link for one flux
+	// channel, for sharing a config with someone without a subscription.
+	ChannelShareLink(r *http.Request, channelID uint64) (string, error)
 }
 
 // Server holds everything the handlers need.
@@ -154,6 +157,7 @@ func (s *Server) Routes() http.Handler {
 	authed.HandleFunc("PATCH /channels/{id}", s.handleUpdateChannel)
 	authed.HandleFunc("DELETE /channels/{id}", s.handleDeleteChannel)
 	authed.HandleFunc("POST /channels/{id}/rotate", s.handleRotateChannel)
+	authed.HandleFunc("POST /channels/{id}/share-link", s.handleChannelShareLink)
 
 	authed.HandleFunc("GET /users", s.handleListUsers)
 	authed.HandleFunc("POST /users", s.handleCreateUser)

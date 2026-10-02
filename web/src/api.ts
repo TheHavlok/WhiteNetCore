@@ -246,6 +246,8 @@ export const api = {
     request<Channel>("PATCH", `/channels/${id}`, body),
   deleteChannel: (id: number) => request<{ ok: boolean }>("DELETE", `/channels/${id}`),
   rotateChannel: (id: number) => request<{ ok: boolean }>("POST", `/channels/${id}/rotate`),
+  channelShareLink: (id: number) =>
+    request<{ link: string }>("POST", `/channels/${id}/share-link`),
 
   // -- users --------------------------------------------------------------
   users: (params: {
