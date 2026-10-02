@@ -47,15 +47,43 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
 	}
 	defer file.Close()
 
-	endpoints := make([]ResolverAddress, 0, 64)
-	resolverMap := make(map[string]int, 64)
-	seenIPs := make(map[string]struct{}, 64)
-
+	var lines []string
 	scanner := bufio.NewScanner(file)
-	lineNum := 0
 	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, fmt.Errorf("failed to read resolver file %s: %w", path, err)
+	}
+
+	endpoints, resolverMap := ParseResolverList(lines)
+	if len(endpoints) == 0 {
+		return nil, nil, fmt.Errorf("no valid resolvers found in %s", path)
+	}
+
+	sort.Slice(endpoints, func(i, j int) bool {
+		if endpoints[i].IP == endpoints[j].IP {
+			return endpoints[i].Port < endpoints[j].Port
+		}
+		return endpoints[i].IP < endpoints[j].IP
+	})
+
+	return endpoints, resolverMap, nil
+}
+
+// ParseResolverList reads resolvers in the resolver file's line format - an
+// address, address:port, [v6]:port, or a small CIDR range - from a list that
+// did not come from a file: a subscription, an app profile. Blank entries,
+// comments and entries that do not parse are skipped, and an address listed
+// twice is kept once. The order of the list is preserved. The map is the
+// address to its port, as the file loader builds it.
+func ParseResolverList(entries []string) ([]ResolverAddress, map[string]int) {
+	endpoints := make([]ResolverAddress, 0, len(entries))
+	resolverMap := make(map[string]int, len(entries))
+	seenIPs := make(map[string]struct{}, len(entries))
+
+	for _, entry := range entries {
+		line := strings.TrimSpace(entry)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -77,22 +105,7 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
 
 		appendPrefixResolvers(&endpoints, resolverMap, seenIPs, target.prefix, port)
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to read resolver file %s: %w", path, err)
-	}
-	if len(endpoints) == 0 {
-		return nil, nil, fmt.Errorf("no valid resolvers found in %s", path)
-	}
-
-	sort.Slice(endpoints, func(i, j int) bool {
-		if endpoints[i].IP == endpoints[j].IP {
-			return endpoints[i].Port < endpoints[j].Port
-		}
-		return endpoints[i].IP < endpoints[j].IP
-	})
-
-	return endpoints, resolverMap, nil
+	return endpoints, resolverMap
 }
 
 func addResolver(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, ip string, port int) {

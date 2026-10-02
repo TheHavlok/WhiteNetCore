@@ -121,3 +121,33 @@ bad ip
 		t.Fatalf("unexpected port for 1.1.1.1: got=%d want=%d", resolverMap["1.1.1.1"], 5353)
 	}
 }
+
+// A list from a subscription or an app profile goes through the same parser
+// as the resolver file, keeps its order, and drops what it cannot use.
+func TestParseResolverList(t *testing.T) {
+	got, ports := ParseResolverList([]string{
+		"77.88.8.8",
+		" 195.208.4.1:5353 ",
+		"# a comment",
+		"",
+		"not-an-address",
+		"77.88.8.8:53", // the same address again
+		"[2a02:6b8::feed:0ff]:53",
+	})
+	want := []ResolverAddress{
+		{IP: "77.88.8.8", Port: 53},
+		{IP: "195.208.4.1", Port: 5353},
+		{IP: "2a02:6b8::feed:ff", Port: 53},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("entry %d = %v, want %v (all: %v)", i, got[i], want[i], got)
+		}
+	}
+	if ports["195.208.4.1"] != 5353 {
+		t.Fatalf("resolver map = %v", ports)
+	}
+}

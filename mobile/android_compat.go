@@ -2,14 +2,11 @@ package mobile
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"runtime/debug"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +20,6 @@ import (
 	"github.com/thehavlok/whitenet/internal/memprofile"
 	"github.com/thehavlok/whitenet/internal/protect"
 	masterdnsvpn_client "github.com/thehavlok/whitenet/masterdnsvpn/client"
-	masterdnsvpn_config "github.com/thehavlok/whitenet/masterdnsvpn/config"
 )
 
 var (
@@ -303,65 +299,9 @@ func StartVPNAndroid(config string) (*Client, error) {
 	log.Printf("StartVPNAndroid: starting whitenet with clientID=%s port=%d", clientID, port)
 
 	if cfg.Auth.Provider == "dns" || cfg.Net.Transport == "dns" {
-		// Every domain, not just the first: a resolver that rate-limits one
-		// of them still leaves the others, which is the reason the panel
-		// lets an operator delegate several.
-		domains := make([]string, 0, len(cfg.MasterDns.Domains))
-		for _, domain := range cfg.MasterDns.Domains {
-			if domain = strings.TrimSpace(domain); domain != "" {
-				domains = append(domains, strconv.Quote(domain))
-			}
-		}
-		if len(domains) == 0 && cfg.Room.ID != "" {
-			// Older profiles put the single domain in room.id, so that is
-			// still honoured rather than failing a config that used to work.
-			domains = append(domains, strconv.Quote(cfg.Room.ID))
-		}
-		if len(domains) == 0 {
-			return nil, fmt.Errorf("the DNS profile names no domain to tunnel through")
-		}
-
-		// The method is written only when the profile names one. Writing a
-		// default here would change the method under every profile that
-		// predates the field, and the two ends must agree on it.
-		method := ""
-		if cfg.MasterDns.Method != nil {
-			method = fmt.Sprintf("\n\t\t\t\"DATA_ENCRYPTION_METHOD\": %d,", *cfg.MasterDns.Method)
-		}
-
-		jsonStr := fmt.Sprintf(`{
-			"PROTOCOL_TYPE": "SOCKS5",
-			"DOMAINS": [%s],%s
-			"ENCRYPTION_KEY": "%s",
-			"LISTEN_IP": "127.0.0.1",
-			"LISTEN_PORT": %d,
-			"MAX_DOWNLOAD_MTU": 2500,
-			"RX_TX_WORKERS": 12,
-			"TUNNEL_PROCESS_WORKERS": 4,
-			"ARQ_WINDOW_SIZE": 1500,
-			"PACKET_DUPLICATION_COUNT": 1
-		}`, strings.Join(domains, ", "), method, cfg.Crypto.Key, port)
-
-		b64 := base64.StdEncoding.EncodeToString([]byte(jsonStr))
-
-		appCfg, err := masterdnsvpn_config.LoadClientConfigFromJSONBase64WithOverrides(b64, masterdnsvpn_config.ClientConfigOverrides{})
+		appCfg, err := dnsClientConfig(cfg, port)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load masterdnsvpn config: %w", err)
-		}
-
-		if len(appCfg.Resolvers) == 0 {
-			appCfg.Resolvers = []masterdnsvpn_config.ResolverAddress{
-				{IP: "77.88.8.8", Port: 53},
-				{IP: "77.88.8.1", Port: 53},
-				{IP: "77.88.8.88", Port: 53},
-				{IP: "77.88.8.2", Port: 53},
-				{IP: "77.88.8.7", Port: 53},
-				{IP: "77.88.8.3", Port: 53},
-			}
-			appCfg.ResolverMap = make(map[string]int)
-			for i, r := range appCfg.Resolvers {
-				appCfg.ResolverMap[r.IP] = i
-			}
+			return nil, err
 		}
 
 		app, err := masterdnsvpn_client.BootstrapLoadedConfig(appCfg, "")
