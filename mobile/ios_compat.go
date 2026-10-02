@@ -243,9 +243,24 @@ func (h *tunHandler) HandleUDP(conn adapter.UDPConn) {
 	conn.Close()
 }
 
+// applyIOSMemoryLimits keeps the Go heap under the packet tunnel's jetsam
+// ceiling, the same tuning startXrayIOS and StartVPN use.
+func applyIOSMemoryLimits() {
+	debug.SetGCPercent(20)
+	debug.SetMemoryLimit(iosSoftMemoryLimit)
+}
+
 // StartVPN is the main entry point for the iOS TUN mode.
 func StartVPN(config string) (*Client, error) {
-	// См. StartVPNAndroid: тип профиля определяется по формату конфига.
+	// Тип профиля определяется по формату конфига. flux проверяется первым:
+	// его профиль — тоже JSON, и без этого ушёл бы в ядро Xray.
+	if IsFluxConfig(config) {
+		applyIOSMemoryLimits()
+		return startFluxClient(config, func(port int) *Client {
+			activeClient = &Client{socksPort: port}
+			return activeClient
+		})
+	}
 	if IsXrayConfig(config) {
 		return startXrayIOS(config)
 	}

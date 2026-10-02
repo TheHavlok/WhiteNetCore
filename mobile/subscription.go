@@ -379,7 +379,7 @@ func buildServer(server subscription.Server) *Server {
 	// configuration.
 	if server.Protocol == subscription.ProtocolFlux &&
 		server.Flux != nil && len(server.Flux.Channels) == 0 {
-		out.Kind = string(clientprofile.KindWhiteNet)
+		out.Kind = string(clientprofile.KindFlux)
 		out.LeaseURL = server.Flux.Lease
 		if out.LeaseURL == "" {
 			out.Error = "this flux server offers neither a channel nor a lease endpoint"

@@ -754,6 +754,7 @@ func WaitReady(timeoutMillis int) error {
 func Stop() {
 	stopSupervisor()
 	stopClient()
+	stopFluxClient()
 	xray.Stop()
 	markDNSCoreRunning(false)
 }

@@ -231,6 +231,13 @@ func (h *tunHandlerAndroid) HandleUDP(conn adapter.UDPConn) {
 
 // StartVPNAndroid is the dedicated entry point for Android.
 func StartVPNAndroid(config string) (*Client, error) {
+	// flux проверяется первым: его профиль — JSON, как и у Xray.
+	if IsFluxConfig(config) {
+		return startFluxClient(config, func(port int) *Client {
+			activeClientAndroid = &Client{socksPort: port}
+			return activeClientAndroid
+		})
+	}
 	// Профиль Xray приходит тем же полем, что и WhiteNet-овский, и отличается
 	// только форматом: JSON против YAML. Разводим по содержимому, чтобы
 	// платформенным слоям не пришлось таскать рядом отдельный флаг типа —

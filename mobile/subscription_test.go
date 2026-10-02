@@ -184,8 +184,14 @@ func TestFluxConnectBuildsAProfileFromTheLease(t *testing.T) {
 	if !leased {
 		t.Fatal("no lease was taken")
 	}
-	if !strings.Contains(lease.Config, "provider: cupsonline") {
-		t.Fatalf("config does not use the leased carrier:\n%s", lease.Config)
+	if lease.Kind != "flux" {
+		t.Fatalf("kind = %q, want flux", lease.Kind)
+	}
+	// The leased carrier has to be in the profile the app will start, in the
+	// flux client's JSON shape.
+	if !strings.Contains(lease.Config, `"type":"cupsonline"`) ||
+		!strings.Contains(lease.Config, "whitenet_flux") {
+		t.Fatalf("config does not carry the leased carrier:\n%s", lease.Config)
 	}
 	if lease.RenewURL == "" || lease.ReleaseURL == "" {
 		t.Fatalf("the app cannot keep or return the channel: %+v", lease)
